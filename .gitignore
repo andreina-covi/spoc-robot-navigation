@@ -95,3 +95,6 @@ data_generation/datagen_scripts/*.jpg
 *.mp4
 
 utils/beaker
+
+# Configuration bash
+configure_variables.sh

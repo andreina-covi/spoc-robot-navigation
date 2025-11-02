@@ -521,11 +521,11 @@ class OnlineEvaluatorWorker:
                     task_info["sample_id"] + "_" + sample_result["goal"].replace(" ", "-") + ".mp4"
                 )
 
-                video_path_to_send = cast(str, os.path.join(self.outdir, eps_name))
-                print(f"Saving video to {video_path_to_send}")
-                save_frames_to_mp4(
-                    frames=sample_result["all_video_frames"], file_path=video_path_to_send, fps=5
-                )
+                # video_path_to_send = cast(str, os.path.join(self.outdir, eps_name))
+                # print(f"Saving video to {video_path_to_send}")
+                # save_frames_to_mp4(
+                #     frames=sample_result["all_video_frames"], file_path=video_path_to_send, fps=5
+                # )
 
                 topdown_view_path = os.path.join(self.outdir, eps_name + "_topdown.png")
                 plt.imsave(fname=cast(str, topdown_view_path), arr=sample_result["top_down_frame"])
@@ -535,7 +535,7 @@ class OnlineEvaluatorWorker:
 
                 video_table_data = dict(
                     goal=sample_result["goal"],
-                    video_path=video_path_to_send,
+                    # video_path=video_path_to_send,
                     topdown_view_path=topdown_view_path,
                     success=bool(sample_result["metrics"]["success"] > 0.1),
                     eps_len=sample_result["metrics"]["eps_len"],

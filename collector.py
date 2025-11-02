@@ -29,10 +29,6 @@ class Collector:
             rounded_arr = arr_numbers
         return tuple([np.round(number, n_round) for number in rounded_arr])
     
-    def get_name_object(self, str):
-        new_str = str.split("|")[0]
-        return new_str
-    
     def get_object_data(self, arr_objects):
         objects = set()
         cond_objs = []
