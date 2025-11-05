@@ -189,7 +189,7 @@ class StretchController:
 
     def step(self, **kwargs):
         if "renderImageSynthesis" not in kwargs:
-            kwargs["renderImageSynthesis"] = self.should_render_image_synthesis
+            kwargs["renderImageSynthesis"] = True #self.should_render_image_synthesis
 
         return self.controller.step(**kwargs)
 
