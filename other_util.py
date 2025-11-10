@@ -123,8 +123,8 @@ def calculate_focal_length(val, fov):
     return f
 
 def get_center_point(bbox):
-    xc = np.average([bbox[0], bbox[2]])
-    yc = np.average([bbox[1], bbox[3]])
+    xc = np.mean([bbox[0], bbox[2]])
+    yc = np.mean([bbox[1], bbox[3]])
     return xc, yc
 
 # -------- Example usage --------
