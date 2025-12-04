@@ -189,8 +189,9 @@ class StretchController:
 
     def step(self, **kwargs):
         if "renderImageSynthesis" not in kwargs:
-            kwargs["renderImageSynthesis"] = True #self.should_render_image_synthesis
-
+            kwargs["renderImageSynthesis"] = self.should_render_image_synthesis
+        # for getting instance_masks, instance_segmentation_frame or instance_detections2d you need to modify to:
+        # kwargs["renderImageSynthesis"] = True
         return self.controller.step(**kwargs)
 
     def get_top_down_path_view(self, agent_path, targets_to_highlight=None):

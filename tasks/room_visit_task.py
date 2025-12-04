@@ -122,10 +122,11 @@ class RoomVisitTask(AbstractSPOCTask):
             event = self.controller.agent_step(action=action_str)
             self.last_action_success = bool(event)
             objects = [self.controller.get_object(obj) for obj in self.controller.get_visible_objects()]
-            if self.controller.controller.last_event.instance_segmentation_frame is None:
-                print("instance segmentation is none")
-            else:
-                self.collector.collect_data(event, self.controller.controller, action_str, objects)
+            # if self.controller.controller.last_event.instance_segmentation_frame is None:
+            #     print("instance segmentation is none")
+            # else:
+            #     self.collector.collect_data(event, self.controller.controller, action_str, objects)
+            self.collector.collect_data(event, action_str, objects)
 
             position = self.controller.get_current_agent_position()
             self.path.append(position)

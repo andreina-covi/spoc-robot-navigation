@@ -130,14 +130,15 @@ def projection_with_angles(foc_l, alpha, betha, c_point):
     v = foc_l[1] * np.tan(np.deg2rad(betha)) + c_point[1]
     return float(u), float(v)
 
-def transform_3d_to_2d(ag_pos, ag_rot, obj_pos, bbox, c_point, foc_l):
+def transform_3d_to_2d(ag_pos, ag_rot, obj_pos, c_point, foc_l):
     x_l, y_l, z_l = world_to_local(ag_pos, ag_rot, obj_pos)
     alpha = calculate_angle(x_l, z_l)
     betha = calculate_angle(y_l, z_l)
-    u_b, v_b = get_center_point(bbox)
-    u_a, v_a = projection_with_angles(foc_l, alpha, betha, c_point)
+    # u_b, v_b = get_center_point(bbox)
+    # u_a, v_a = projection_with_angles(foc_l, alpha, betha, c_point)
     u_l, v_l = projection_with_local_vector((x_l, y_l, z_l), c_point, foc_l)
-    return (u_b, v_b), (u_a, v_a), (u_l, v_l), alpha, betha
+    # return (u_b, v_b), (u_a, v_a), (u_l, v_l), alpha, betha
+    return (x_l, y_l, z_l), (u_l, v_l), alpha, betha
 
 def calculate_focal_length(val, fov):
     f = val / (2 * np.tan(np.deg2rad(fov/2)))
@@ -149,14 +150,43 @@ def get_other_fov(val1, val2, fov):
 
 def get_focal_length(w, h, fov_v):
     fy = calculate_focal_length(h, fov_v)
-    # print("fy", fy)
     fov_h = get_other_fov(w, h, fov_v)
     # print("fov_h", fov_h)
     fx = calculate_focal_length(w, fov_h)
-    return fx, fy
+    # print(f"Focal length -> fx: {fx}, fy: {fy}.")
+    # print(f"Fov-> h: {fov_h}, v: {fov_v}")
+    return fx, fy, fov_h
 
-def get_spatial_relations(dict_navigation, w, h, fov_v):
-    fx, fy = get_focal_length(w, h, fov_v)
+def get_x_direction(alpha, fov_h, epsilon=1/3):
+    t_alpha = epsilon * (fov_h / 2)
+    x_dir = "front"
+    if alpha >t_alpha:
+        x_dir = "right"
+    elif alpha < t_alpha * -1:
+        x_dir = "left"
+    return x_dir
+
+def get_y_direction(betha, fov_v, epsilon=1/3):
+    t_betha = epsilon * (fov_v / 2)
+    y_dir = ""
+    if betha > t_betha:
+        y_dir = "above"
+    elif betha < (t_betha * -1):
+        y_dir = "below"
+    return y_dir
+
+def get_z_direction(distance):
+    return distance
+
+def get_direction(bbox, alpha, betha, distance, fov_h, fov_v, epsilon=1/3):
+    x_dir = get_x_direction(alpha, fov_h, epsilon) #rirght, left
+    y_dir = get_y_direction(bbox, betha, fov_v, epsilon) # above, below
+    z_dir = get_z_direction(distance) # front, behind
+    return x_dir, y_dir, z_dir
+
+def get_spatial_relations(dict_navigation, w, h, fov_v, epsilon=1/3):
+    fx, fy, fov_h = get_focal_length(w, h, fov_v)
+    # print(f"Focal length: {fx}, {fy}")
     c_point = (w // 2, h // 2)
     # palette = sns.color_palette("Set2", n_colors=20)
     for i, (d_agent, d_objects) in enumerate(dict_navigation.items()):
@@ -175,12 +205,14 @@ def get_spatial_relations(dict_navigation, w, h, fov_v):
             obj_pos = np.array(obj_pos)
             # text_pos, rel_pos = relational_position(ag_pos, obj_pos)
             # print(text_pos, rel_pos)
-            p_bbox, p_a, p_l, alpha, betha = transform_3d_to_2d(ag_pos, ag_rot, obj_pos, bbox, c_point, (fx, fy)) 
+            w_to_l, p_l, alpha, betha = transform_3d_to_2d(ag_pos, ag_rot, obj_pos, c_point, (fx, fy)) 
             # rel_dist, az, el = data_from_world(rel_pos)
-            
-            dir = cardinal_from_bbox(bbox, c_point)
+            # obj_name = split_name(obj)[0]
+            dir = get_direction(bbox, alpha, betha, dist, fov_h, fov_v, epsilon)
+            # dir = cardinal_from_bbox(bbox, c_point)
             print(f"Object: {obj}, Dist: {dist}") #, Rel pos: {rel_pos}, Text pos: {text_pos}")
-            print(f"BBox: {p_bbox}, Point angle: {p_a}, Point local vector: {p_l}")
+            # print(f"BBox: {p_bbox}, Point angle: {p_a}, Point local vector: {p_l}")
+            print(f"Difference btw object and agent: {w_to_l}. Point local vector: {p_l}")
             print(f"Angle from 3d to 2d: alpha: {alpha}, betha: {betha}, dir: {dir}")
             print("++++++++")
         print("----------------------------------")
