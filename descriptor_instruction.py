@@ -8,7 +8,8 @@ import seaborn as sns
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Online evaluation")
-    parser.add_argument("--csv_path", type=str)
+    parser.add_argument("--csv_path_navigation", type=str)
+    parser.add_argument("--csv_path_objects", type=str)
     # parser.add_argument("--jsonl_out", default="train.jsonl", type=str)
     # parser.add_argument("--max_eps_len", default=-1, type=int)
     # parser.add_argument("--det_type", default="gt", help="gt or detic", choices=["gt", "detic"])
@@ -236,7 +237,42 @@ def draw_on_frame(frame_bgr, uvs, p_point, palette):
         cv2.putText(out, str(i), (u, v), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
     return out
 
-def get_records(csv_path):
+def get_dataframe(filename):
+    df = pd.read_csv(filename)
+    return df
+
+# def get_records_objects(csv_path):
+#     df = pd.read_csv(csv_path)
+#     dict_objects = {}
+#     for _, row in df.iterrows():
+#         obj_id = row.get("obj-id")
+#         obj_type = row.get("obj-type")
+#         obj_pos_x = row.get("obj-pos-x")
+#         obj_pos_y = row.get("obj-pos-y")
+#         obj_pos_z = row.get("obj-pos-z")
+#         obj_rot_x = row.get("obj-rot-x")
+#         obj_rot_y = row.get("obj-rot-y")
+#         obj_rot_z = row.get("obj-rot-z")
+#         rec_obj_ids = row.get("receptacleObjectIds")
+#         obj_bbox_x = row.get("objOrBBox-x")
+#         obj_bbox_y = row.get("objOrBBox-y")
+#         obj_bbox_z = row.get("objOrBBox-z")
+#         dict_objects[obj_id] = {
+#             "obj_type": obj_type,
+#             "obj_pos_x": obj_pos_x,
+#             "obj_pos_y": obj_pos_y,
+#             "obj_pos_z": obj_pos_z,
+#             "obj_rot_x": obj_rot_x,
+#             "obj_rot_y": obj_rot_y,
+#             "obj_rot_z": obj_rot_z,
+#             "rec_obj_ids": rec_obj_ids,
+#             "obj_bbox_x": obj_bbox_x,
+#             "obj_bbox_y": obj_bbox_y,
+#             "obj_bbox_z": obj_bbox_z,
+#         }
+    
+
+def get_records_navigation(csv_path):
     df = pd.read_csv(csv_path)
     dict_navigation = {}
     for _, row in df.iterrows():
@@ -248,23 +284,23 @@ def get_records(csv_path):
         ag_rot_y = row.get("ag-rot-y")
         ag_rot_z = row.get("ag-rot-z")
         obj = row.get("obj-id")
-        obj_pos_x = row.get("obj-pos-x")
-        obj_pos_y = row.get("obj-pos-y")
-        obj_pos_z = row.get("obj-pos-z")
+        # obj_pos_x = row.get("obj-pos-x")
+        # obj_pos_y = row.get("obj-pos-y")
+        # obj_pos_z = row.get("obj-pos-z")
         dist = row["obj-distance"]
-        cmin = row.get("cmin")
-        rmin = row.get("rmin")
-        cmax = row.get("cmax")
-        rmax = row.get("rmax")
+        # cmin = row.get("cmin")
+        # rmin = row.get("rmin")
+        # cmax = row.get("cmax")
+        # rmax = row.get("rmax")
         path = row.get("path")
         key = (path, action, (ag_pos_x, ag_pos_y, ag_pos_z), (ag_rot_x, ag_rot_y, ag_rot_z))
         if key not in dict_navigation:
             dict_navigation[key] = []
         dict_navigation[key].append({
             "Object": obj, 
-            "Position": (obj_pos_x, obj_pos_y, obj_pos_z), 
+            # "Position": (obj_pos_x, obj_pos_y, obj_pos_z), 
             "Distance": dist,
-            "BBox": (cmin, rmin, cmax, rmax)
+            # "BBox": (cmin, rmin, cmax, rmax)
         })
     return dict_navigation
 
@@ -274,13 +310,15 @@ def write_json(json_path, records):
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
 def main(args):
-    csv_path = args.csv_path
+    csv_path_navigation = args.csv_path_navigation
+    csv_path_objects = args.csv_path_objects
     # jsonl_out = args.jsonl_out
-    records = get_records(csv_path)
+    df_nav = get_dataframe(csv_path_navigation)
+    df_obj = get_dataframe(csv_path_objects)
     w, h = 396, 224
     # p_point = (w//2, h//2)
     fov_v = 59
-    get_spatial_relations(records, w, h, fov_v)
+    get_spatial_relations(df_nav, df_obj, w, h, fov_v)
     # write_json(jsonl_out, records)
 
 # print(f"✅ Saved {len(records)} examples to {jsonl_out}")
