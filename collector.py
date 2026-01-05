@@ -6,6 +6,7 @@ import pandas as pd
 import cv2
 
 from utils.constants.objaverse_data_dirs import OBJAVERSE_NAVIGATION_PATH
+from utils.constants.stretch_initialization_utils import AGENT_ROTATION_DEG
 from utils.type_utils import THORActions
 
 class Collector:
@@ -90,12 +91,13 @@ class Collector:
     #     dict_data['cmax'].append(bbox[2])
     #     dict_data['rmax'].append(bbox[3])
 
-    def save_data_navigation(self, dict_navigation, key, objects_data, path_image):
+    def save_data_navigation(self, dict_navigation, key, objects_data, path_image, degrees):
         # print("key: ", key)
         for object_data in objects_data:
             dict_navigation['ag-action'].append(key[0])
             self.save_data_by_axis(dict_navigation, 'ag-pos', key[1])
             self.save_data_by_axis(dict_navigation, 'ag-rot', key[2])
+            dict_navigation['degrees'].append(degrees)
             # dict_navigation['obj-type'].append(object_data[0])
             dict_navigation['obj-id'].append(object_data[0])
             # self.save_data_by_axis(dict_navigation, 'obj-pos', object_data[2])
@@ -116,14 +118,15 @@ class Collector:
         #     'cmin': [], 'rmin': [], 'cmax': [], 'rmax': [], 'path': []
         #     }
         dict_navigation = {
-            'ag-action': [], 'ag-pos-x': [], 'ag-pos-y': [], 'ag-pos-z': [], 
+            'ag-action': [], 'degrees': [], 'ag-pos-x': [], 'ag-pos-y': [], 'ag-pos-z': [], 
             'ag-rot-x': [], 'ag-rot-y': [], 'ag-rot-z': [], #'obj-type': [], 
             'obj-id': [], 'obj-distance': [], 'path': []
             }
         for key in self.dict_agent:
             object_data = self.dict_agent[key]['objects']
             image_path = self.dict_agent[key]['image']
-            self.save_data_navigation(dict_navigation, key, object_data, image_path)
+            degrees = self.dict_agent[key]['degrees']
+            self.save_data_navigation(dict_navigation, key, object_data, image_path, degrees)
         return dict_navigation
     
     # def save_data_by_axis_bbox(self, dict_objects, base_name, bbox):
@@ -161,6 +164,7 @@ class Collector:
         if key not in self.dict_agent:
             self.dict_agent[key] = {'objects': [], 'image': ''}
             # cond_objs = self.get_object_data(objects)
+            self.dict_agent[key]["degrees"] = AGENT_ROTATION_DEG
             cond_objs, objects = self.get_object_data(v_objects)
             self.dict_agent[key]['objects'] = cond_objs
             if self.data_objects['objects']:

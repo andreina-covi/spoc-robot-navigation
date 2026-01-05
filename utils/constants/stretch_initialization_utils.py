@@ -18,7 +18,7 @@ except ImportError:
         f" ai2thor==0+5e43486351ac6339c399c199e601c9dd18daecc3\n```"
     )
 
-AGENT_ROTATION_DEG = 30
+AGENT_ROTATION_DEG = 45
 AGENT_MOVEMENT_CONSTANT = 0.2
 HORIZON = 0  # RH: Do not change from 0! this is now set elsewhere with RotateCameraMount actions
 ARM_MOVE_CONSTANT = 0.1
