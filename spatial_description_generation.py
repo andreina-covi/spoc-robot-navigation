@@ -61,8 +61,8 @@ def projection_with_local_vector(local_xyz, c_point, foc_l):
     v = foc_l[1] * (yl / zl) + c_point[1]
     return float(u), float(v)
 
-def transform_3d_to_2d(ag_pos, ag_rot, obj_pos, c_point, foc_l):
-    x_l, y_l, z_l = world_to_local(ag_pos, ag_rot, obj_pos)
+def transform_3d_to_2d(obj1_pos, obj1_rot, obj2_pos, c_point, foc_l):
+    x_l, y_l, z_l = world_to_local(obj1_pos, obj1_rot, obj2_pos)
     alpha = calculate_angle(x_l, z_l)
     betha = calculate_angle(y_l, z_l)
     u_l, v_l = projection_with_local_vector((x_l, y_l, z_l), c_point, foc_l)
@@ -93,7 +93,7 @@ def get_direction(alpha, betha, distance, fov_h, fov_v, epsilon=1/3):
     x_dir = get_x_direction(alpha, fov_h, epsilon) #rirght, left
     y_dir = get_y_direction(betha, fov_v, epsilon) # above, below
     z_dir = get_z_direction(distance) # front, behind
-    return x_dir, y_dir, z_dir
+    return (x_dir, y_dir, z_dir)
 
 def transform_text2list(text):
     t = ast.literal_eval(text)
@@ -215,6 +215,7 @@ def get_records_navigation(csv_path):
     df = pd.read_csv(csv_path)
     dict_navigation = {}
     for _, row in df.iterrows():
+        timestep = row.get('timestep')
         action = row.get("ag-action")
         degrees = row.get("degrees")
         ag_pos_x = row.get("ag-pos-x")
@@ -224,16 +225,103 @@ def get_records_navigation(csv_path):
         ag_rot_y = row.get("ag-rot-y")
         ag_rot_z = row.get("ag-rot-z")
         obj = row.get("obj-id")
-        dist = row["obj-distance"]
         path = row.get("path")
-        key = (action, degrees, (ag_pos_x, ag_pos_y, ag_pos_z), (ag_rot_x, ag_rot_y, ag_rot_z), path)
-        if key not in dict_navigation:
-            dict_navigation[key] = []
-        dict_navigation[key].append({
-            "object": obj, 
-            "distance": dist,
-        })
+        if timestep not in dict_navigation:
+            dict_navigation[timestep] = {
+                "action": action,
+                "degrees": degrees,
+                "ag_pos": (ag_pos_x, ag_pos_y, ag_pos_z),
+                "ag_rot": (ag_rot_x, ag_rot_y, ag_rot_z),
+                "path": path,
+                "objects": [],
+            }
+        dict_navigation[timestep]['objects'].append(obj)
     return dict_navigation
+
+def create_nodes(dict_navigation, df_obj):
+    nodes = {}
+    for timestep, data in dict_navigation.items():
+        nodes[timestep] = {}
+        ag_pos = data['ag_pos']
+        ag_rot = data['ag_rot']
+        nodes[timestep]['agent'] = {
+            'category': 'agent',
+            'position': ag_pos,
+            'rotation': ag_rot
+        }
+        objects = data['objects']
+        for obj in objects:
+            data_object = df_obj[df_obj['obj-id'] == obj].iloc[0]
+            obj_pos = tuple(data_object[['obj-pos-x', 'obj-pos-y', 'obj-pos-z']])
+            # obj_rot = tuple(data_object[['obj-rot-x', 'obj-rot-y', 'obj-rot-z']])
+            # recep_objs = transform_text2list(data_object['receptacleObjectIds'])
+            nodes[timestep][obj] = {
+                'category': data_object['obj-type'],
+                'position': obj_pos,
+                'rotation': tuple(data_object[['obj-rot-x', 'obj-rot-y', 'obj-rot-z']]),
+                'visible': 1, #int(obj in data['objects']),
+                'bbox': tuple(data_object[['objOrBBox-x', 'objOrBBox-y', 'objOrBBox-z']])
+            }
+    return nodes
+
+def get_knn(obj_id, data, k=3):
+    obj_pos = np.array(data[obj_id]['position'])
+    neighbors = []
+    for other_id, other_data in data.items():
+        if other_id != obj_id:
+            other_pos = np.array(other_data['position'])
+            dist = np.linalg.norm(obj_pos - other_pos)
+            neighbors.append((other_id, dist))
+    neighbors.sort(key=lambda x: x[1])
+    knn_neighbors = [n[0] for n in neighbors[:k]]
+    return knn_neighbors
+
+def transform3d_to_2d(obj1_data, obj2_data, hyperparams):
+    obj1_pos = obj1_data['position']
+    obj1_rot = obj1_data['rotation']
+    obj2_pos = obj2_data['position']
+    w, h = hyperparams['w'], hyperparams['h']
+    fov_v = hyperparams['fov_v']
+    fx, fy, fov_h = get_focal_length(w, h, fov_v)
+    c_point = (w // 2, h // 2)
+    return transform_3d_to_2d(obj1_pos, obj1_rot, obj2_pos, c_point, (fx, fy))
+
+def get_spatial_direction(obj1, obj2, dist, dict_obj, hyperparams):
+    w_to_l, p_l, alpha, betha = transform3d_to_2d(dict_obj[obj1], dict_obj[obj2], hyperparams) 
+    return get_direction(alpha, betha, dist, hyperparams['fov_h'], hyperparams['fov_v'], hyperparams['epsilon'])
+
+def edges_btw_neighbors(obj_id, neighbors, data, hyperparams):
+    edges = []
+    for neighbor in neighbors:
+        dist = np.linalg.norm(np.array(data[obj_id]['position']) - np.array(data[neighbor]['position']))
+        edge = {
+            'source': obj_id,
+            'target': neighbor,
+            'distance': dist,
+            'relation': get_spatial_direction(obj_id, neighbor, dist, data, hyperparams),
+            'confidence': 1.0 # this can be calculated based on distance or other factors
+        }
+        edges.append(edge)
+    return edges
+
+def create_edges(nodes, hyperparams):
+    edges = {}
+    for timestep, data in nodes.items():
+        edges[timestep] = []
+        # create edges btw agent and objects
+        for obj_id in data.keys():
+            if obj_id == 'agent':
+                neighbors = data.keys() - {'agent'}
+            else:
+                neighbors = get_knn(obj_id, data, k=hyperparams['k_neighbors'])
+            edges[timestep] = edges_btw_neighbors(obj_id, neighbors, data, hyperparams)
+    return edges
+        
+def create_graph(dict_navigation, df_obj, hyperparams):
+    graph = {'nodes': {}, 'edges': {}}
+    graph['nodes'] = create_nodes(dict_navigation, df_obj)
+    # crear las aristas dependiendo de la relacion y distancia entre objetos y agente (e.g. distancia, visibilidad, etc.)
+    graph['edges'] = create_edges(graph['nodes'], hyperparams)
 
 def export_to_json(filename, data):
     with open(filename, "w") as f:
@@ -261,10 +349,12 @@ def main(args):
     FOV_V = 59
     dict_nav = get_records_navigation(path_navigation)
     df_obj = pd.read_csv(path_objects)
-    sp_data, spat_ann, traj = get_spatial_relations(dict_nav, episode, df_obj, W, H, FOV_V)
-    export_to_json(os.path.join(path_json_nav), sp_data)
-    export_to_json(os.path.join(path_json_spat_rels), spat_ann)
-    export_to_json(os.path.join(path_json_traj), traj)
+    # sp_data, spat_ann, traj = get_spatial_relations(dict_nav, episode, df_obj, W, H, FOV_V)
+    graph = create_graph(dict_nav, episode, df_obj, W, H, FOV_V)
+    export_to_json(os.path.join(path_json_nav), graph)
+    # export_to_json(os.path.join(path_json_nav), sp_data)
+    # export_to_json(os.path.join(path_json_spat_rels), spat_ann)
+    # export_to_json(os.path.join(path_json_traj), traj)
 
 if __name__ == '__main__':
     args = parse_args()

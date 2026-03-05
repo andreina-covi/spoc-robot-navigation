@@ -14,7 +14,9 @@ class Collector:
     def __init__(self):
         self.dict_agent = {}
         self.data_objects = {'objects': set()}
-        self.index = 0
+        # self.graph = {"nodes": {}, "edges": [], "memory": {}}
+        # self.actions = []
+        self.timestep = 0
         dt = datetime.datetime.now().strftime("%m_%d_%Y_%H_%M_%S_%f")
         self.image_path = os.path.join(OBJAVERSE_NAVIGATION_PATH, dt, 'images')
         self.objects_path = os.path.join(OBJAVERSE_NAVIGATION_PATH, dt, 'objects.csv')
@@ -155,6 +157,7 @@ class Collector:
             self.save_data_by_axis(dict_objects, 'objOrBBox', t[5])
         return dict_objects
 
+    # method called by the room visit task after each action to save the data of the agent and the visible objects
     def collect_data(self, event, action, v_objects):
         # print("Visible objects: ", v_objects)
         position = self.round_number(event.metadata['agent']['position'], 2)
@@ -172,10 +175,11 @@ class Collector:
             else:
                 self.data_objects['objects'] = objects
             # save image
-            image_name = os.path.join(self.image_path, 'img_' + str(self.index) + '.png')
+            image_name = os.path.join(self.image_path, 'img_' + str(self.timestep) + '.png')
             self.dict_agent[key]['image'] = image_name
             self.save_image(image_name, event)
-            self.index += 1
+            # update timestep
+            self.timestep += 1
 
     def save_data(self):
         dict_navigation = self.get_dict_navigation()
