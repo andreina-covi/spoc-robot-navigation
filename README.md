@@ -26,18 +26,19 @@ python -m spatial_description_generation \
  --csv_path_objects filename \
  --json_path_navigation filename \
  --json_path_spatial_rels filename \
- --json_path_trajectories filename \
- --episode_key string
+ --json_path_trajectories filename
 ```
+# --episode_key string
 
 Usage example:
 
 ```bash
 python -m spatial_description_generation \
- --csv_path_navigation /home/andreina/Documents/Programs/Dataset/Generated/navigation/12_05_2025_16_54_13_515802/navigation.csv \
- --csv_path_objects /home/andreina/Documents/Programs/Dataset/Generated/navigation/12_05_2025_16_54_13_515802/objects.csv \
- --json_path_navigation /home/andreina/Documents/Programs/Dataset/Generated/navigation/12_05_2025_16_54_13_515802/jsons/nav_1.json \
- --json_path_spatial_rels /home/andreina/Documents/Programs/Dataset/Generated/navigation/12_05_2025_16_54_13_515802/jsons/spa_rels_1.json \
- --json_path_trajectories /home/andreina/Documents/Programs/Dataset/Generated/navigation/12_05_2025_16_54_13_515802/jsons/traj_1.json \
- --episode_key episode_1
+ --csv_path_navigation /home/andreina/Documents/Programs/Dataset/Generated/navigation/02_11_2026_19_49_21_223709/navigation.csv \
+ --csv_path_objects /home/andreina/Documents/Programs/Dataset/Generated/navigation/02_11_2026_19_49_21_223709/objects.csv \
+ --json_path_navigation /home/andreina/Documents/Programs/Dataset/Generated/navigation/02_11_2026_19_49_21_223709/jsons/nav_1.json \
+ --json_path_spatial_rels /home/andreina/Documents/Programs/Dataset/Generated/navigation/02_11_2026_19_49_21_223709/jsons/spa_rels_1.json \
+ --json_path_trajectories /home/andreina/Documents/Programs/Dataset/Generated/navigation/02_11_2026_19_49_21_223709/jsons/traj_1.json
 ```
+
+# --episode_key episode_1

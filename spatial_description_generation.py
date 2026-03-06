@@ -1,72 +1,73 @@
-import os
+# import os
 import ast
 import re
 import json
-import math
+# import math
 import argparse
 import numpy as np
 import pandas as pd
-import seaborn as sns
+# import seaborn as sns
 import cv2
 
 
-def calculate_focal_length(val, fov):
-    f = val / (2 * np.tan(np.deg2rad(fov/2)))
-    return f
+# def calculate_focal_length(val, fov):
+#     f = val / (2 * np.tan(np.deg2rad(fov/2)))
+#     return f
 
-def get_other_fov(val1, val2, fov):
-    fov_other = 2 * np.arctan((val1 / val2) * np.tan(np.deg2rad(fov / 2)))
-    return np.degrees(fov_other)
+# def get_other_fov(val1, val2, fov):
+#     fov_other = 2 * np.arctan((val1 / val2) * np.tan(np.deg2rad(fov / 2)))
+#     return np.degrees(fov_other)
 
-def get_focal_length(w, h, fov_v):
-    fy = calculate_focal_length(h, fov_v)
-    fov_h = get_other_fov(w, h, fov_v)
-    fx = calculate_focal_length(w, fov_h)
-    return fx, fy, fov_h
+# def get_focal_length(w, h, fov_v):s
+#     fy = calculate_focal_length(h, fov_v)
+#     fov_h = get_other_fov(w, h, fov_v)
+#     fx = calculate_focal_length(w, fov_h)
+#     return fx, fy, fov_h
 
-def get_center_point(bbox):
-    xc = np.mean([bbox[0], bbox[2]])
-    yc = np.mean([bbox[1], bbox[3]])
-    return xc, yc
+# def get_center_point(bbox):
+#     xc = np.mean([bbox[0], bbox[2]])
+#     yc = np.mean([bbox[1], bbox[3]])
+#     return xc, yc
 
-def calculate_angle(coord1, coord2):
-    angle = np.arctan2(coord1, coord2)
-    return np.degrees(angle)
+# def calculate_angle(coord1, coord2):
+#     angle = np.arctan2(coord1, coord2)
+#     return np.degrees(angle)
 
-def world_to_local(agent_pos, agent_rot_deg, object_pos):
-    # agent_rot_deg = (pitch_x, yaw_y, roll_z) in degrees
-    pitch, yaw, roll = np.deg2rad(agent_rot_deg)
-    Rx = np.array([[1,0,0],
-                   [0,np.cos(pitch),-np.sin(pitch)],
-                   [0,np.sin(pitch), np.cos(pitch)]])
-    Ry = np.array([[ np.cos(yaw),0,np.sin(yaw)],
-                   [0,1,0],
-                   [-np.sin(yaw),0,np.cos(yaw)]])
-    Rz = np.array([[np.cos(roll),-np.sin(roll),0],
-                   [np.sin(roll), np.cos(roll),0],
-                   [0,0,1]])
-    R_cw = Ry @ Rx @ Rz         # camera->world
-    R_wc = R_cw.T               # world->camera
-    Pw = np.asarray(object_pos).reshape(3,1)
-    C  = np.asarray(agent_pos).reshape(3,1)
-    Pl = (R_wc @ (Pw - C)).flatten()  # local (Xl,Yl,Zl)
-    return Pl  # (x_l, y_l, z_l)
+# def world_to_local(agent_pos, agent_rot_deg, object_pos):
+#     # agent_rot_deg = (pitch_x, yaw_y, roll_z) in degrees
+#     pitch, yaw, roll = np.deg2rad(agent_rot_deg)
+#     Rx = np.array([[1,0,0],
+#                    [0,np.cos(pitch),-np.sin(pitch)],
+#                    [0,np.sin(pitch), np.cos(pitch)]])
+#     Ry = np.array([[ np.cos(yaw),0,np.sin(yaw)],
+#                    [0,1,0],
+#                    [-np.sin(yaw),0,np.cos(yaw)]])
+#     Rz = np.array([[np.cos(roll),-np.sin(roll),0],
+#                    [np.sin(roll), np.cos(roll),0],
+#                    [0,0,1]])
+#     R_cw = Ry @ Rx @ Rz         # camera->world
+#     R_wc = R_cw.T               # world->camera
+#     Pw = np.asarray(object_pos).reshape(3,1)
+#     C  = np.asarray(agent_pos).reshape(3,1)
+#     Pl = (R_wc @ (Pw - C)).flatten()  # local (Xl,Yl,Zl)
+#     return Pl  # (x_l, y_l, z_l)
 
-def projection_with_local_vector(local_xyz, c_point, foc_l):
-    xl, yl, zl = local_xyz
-    if zl <= 0:
-        # print(f"Z none: {zl}")
-        zl = np.absolute(zl)
-    u = foc_l[0] * (xl / zl) + c_point[0]
-    v = foc_l[1] * (yl / zl) + c_point[1]
-    return float(u), float(v)
+# def projection_with_local_vector(local_xyz, c_point, foc_l):
+#     # print(f"local_xyz: {local_xyz}, c_point: {c_point}, foc_l: {foc_l}")
+#     xl, yl, zl = local_xyz
+#     if zl <= 0:
+#         print(f"Z none: {zl}")
+#         zl = np.absolute(zl)
+#     u = foc_l[0] * (xl / zl) + c_point[0]
+#     v = foc_l[1] * (yl / zl) + c_point[1]
+#     return float(u), float(v)
 
-def transform_3d_to_2d(obj1_pos, obj1_rot, obj2_pos, c_point, foc_l):
-    x_l, y_l, z_l = world_to_local(obj1_pos, obj1_rot, obj2_pos)
-    alpha = calculate_angle(x_l, z_l)
-    betha = calculate_angle(y_l, z_l)
-    u_l, v_l = projection_with_local_vector((x_l, y_l, z_l), c_point, foc_l)
-    return (x_l, y_l, z_l), (u_l, v_l), alpha, betha
+# def transform_3d_to_2d(obj1_pos, obj1_rot, obj2_pos, c_point, foc_l):
+#     x_l, y_l, z_l = world_to_local(obj1_pos, obj1_rot, obj2_pos)
+#     alpha = calculate_angle(x_l, z_l)
+#     betha = calculate_angle(y_l, z_l)
+#     u_l, v_l = projection_with_local_vector((x_l, y_l, z_l), c_point, foc_l)
+#     return (x_l, y_l, z_l), (u_l, v_l), alpha, betha
 
 def get_x_direction(alpha, fov_h, epsilon=1/3):
     t_alpha = epsilon * (fov_h / 2)
@@ -144,72 +145,72 @@ def get_spatial_descriptions(object_dict):
         text = f"From the agent's viewpoint, the {name} is {phr_dir_x} the agent and {phr_dir_z}"
     return text
 
-# create a json file for training a LLM
-def get_spatial_relations(dict_navigation, episode_id, df_obj, w, h, fov_v, epsilon=1/3,):
-    spatial_data = {
-        "episode": episode_id,
-        "agent_frame": "egocentric",
-        "sequence": []
-    }
-    spatial_annotation = {
-        "episode": episode_id,
-        "sequence": []
-    }
-    trajectories = {
-        "episode": episode_id
-    }
-    fx, fy, fov_h = get_focal_length(w, h, fov_v)
-    c_point = (w // 2, h // 2)
-    # deg = 30
-    for i, (d_agent, d_objects) in enumerate(dict_navigation.items()):
-        action, deg, ag_pos, ag_rot, path = d_agent
-        ag_pos = np.array(ag_pos)
-        ag_rot = np.array(ag_rot)
-        step_dict = {
-            "step": i,
-            "action": "initialize" if i == 0 else action,
-            # "degrees": deg if i > 0 else 0,
-            "objects": {}
-        }
-        step_dict["degrees"] = deg if step_dict["action"] not in ["initialize", "move_ahead"] else 0
-        description_dict = {
-            "step": i,
-            "objects": {}
-        }
-        for d_object in d_objects:
-            data_json_object = {}
-            obj_id = d_object["object"]
-            if obj_id not in trajectories:
-                trajectories[obj_id] = []
-            obj_dist = d_object["distance"]
-            data_object = df_obj[df_obj['obj-id'] == obj_id].iloc[0]
-            obj_pos = tuple(data_object[['obj-pos-x', 'obj-pos-y', 'obj-pos-z']])
-            recep_objs = transform_text2list(data_object['receptacleObjectIds'])
-            filtered_recep_objs = []
-            if recep_objs:
-                for recep_obj in recep_objs:
-                    if df_obj['obj-id'].isin([recep_obj]).any():
-                        filtered_recep_objs.append(recep_obj)
-            obj_pos = np.array(obj_pos)
-            w_to_l, p_l, alpha, betha = transform_3d_to_2d(ag_pos, ag_rot, obj_pos, c_point, (fx, fy)) 
-            dir_x, dir_y, dir_z = get_direction(alpha, betha, obj_dist, fov_h, fov_v, epsilon)
-            if obj_id.startswith("window") or obj_id.startswith("wall"):
-                dir_y = ""
-            data_json_object["object_name"] = camel_to_words(data_object['obj-type'])
-            data_json_object["egocentric_label"] = {
-                "horiz": dir_x, 
-                "vert": dir_y,
-                "dist": get_distance_text(dir_z)
-            }
-            data_json_object["relations"] = {
-                "contains": filtered_recep_objs
-            }
-            step_dict["objects"][obj_id] = data_json_object
-            description_dict["objects"][obj_id] = get_spatial_descriptions(data_json_object)
-            trajectories[obj_id].append({"step": i, "horiz": dir_x, "vert": dir_y, "dist": get_distance_text(dir_z)})
-        spatial_data["sequence"].append(step_dict)
-        spatial_annotation["sequence"].append(description_dict)
-    return spatial_data, spatial_annotation, trajectories
+# # create a json file for training a LLM
+# def get_spatial_relations(dict_navigation, episode_id, df_obj, w, h, fov_v, epsilon=1/3,):
+#     spatial_data = {
+#         "episode": episode_id,
+#         "agent_frame": "egocentric",
+#         "sequence": []
+#     }
+#     spatial_annotation = {
+#         "episode": episode_id,
+#         "sequence": []
+#     }
+#     trajectories = {
+#         "episode": episode_id
+#     }
+#     fx, fy, fov_h = get_focal_length(w, h, fov_v)
+#     c_point = (w // 2, h // 2)
+#     # deg = 30
+#     for i, (d_agent, d_objects) in enumerate(dict_navigation.items()):
+#         action, deg, ag_pos, ag_rot, path = d_agent
+#         ag_pos = np.array(ag_pos)
+#         ag_rot = np.array(ag_rot)
+#         step_dict = {
+#             "step": i,
+#             "action": "initialize" if i == 0 else action,
+#             # "degrees": deg if i > 0 else 0,
+#             "objects": {}
+#         }
+#         step_dict["degrees"] = deg if step_dict["action"] not in ["initialize", "move_ahead"] else 0
+#         description_dict = {
+#             "step": i,
+#             "objects": {}
+#         }
+#         for d_object in d_objects:
+#             data_json_object = {}
+#             obj_id = d_object["object"]
+#             if obj_id not in trajectories:
+#                 trajectories[obj_id] = []
+#             obj_dist = d_object["distance"]
+#             data_object = df_obj[df_obj['obj-id'] == obj_id].iloc[0]
+#             obj_pos = tuple(data_object[['obj-pos-x', 'obj-pos-y', 'obj-pos-z']])
+#             recep_objs = transform_text2list(data_object['receptacleObjectIds'])
+#             filtered_recep_objs = []
+#             if recep_objs:
+#                 for recep_obj in recep_objs:
+#                     if df_obj['obj-id'].isin([recep_obj]).any():
+#                         filtered_recep_objs.append(recep_obj)
+#             obj_pos = np.array(obj_pos)
+#             w_to_l, p_l, alpha, betha = transform_3d_to_2d(ag_pos, ag_rot, obj_pos, c_point, (fx, fy)) 
+#             dir_x, dir_y, dir_z = get_direction(alpha, betha, obj_dist, fov_h, fov_v, epsilon)
+#             if obj_id.startswith("window") or obj_id.startswith("wall"):
+#                 dir_y = ""
+#             data_json_object["object_name"] = camel_to_words(data_object['obj-type'])
+#             data_json_object["egocentric_label"] = {
+#                 "horiz": dir_x, 
+#                 "vert": dir_y,
+#                 "dist": get_distance_text(dir_z)
+#             }
+#             data_json_object["relations"] = {
+#                 "contains": filtered_recep_objs
+#             }
+#             step_dict["objects"][obj_id] = data_json_object
+#             description_dict["objects"][obj_id] = get_spatial_descriptions(data_json_object)
+#             trajectories[obj_id].append({"step": i, "horiz": dir_x, "vert": dir_y, "dist": get_distance_text(dir_z)})
+#         spatial_data["sequence"].append(step_dict)
+#         spatial_annotation["sequence"].append(description_dict)
+#     return spatial_data, spatial_annotation, trajectories
 
 def get_records_navigation(csv_path):
     df = pd.read_csv(csv_path)
@@ -276,15 +277,16 @@ def get_knn(obj_id, data, k=3):
     knn_neighbors = [n[0] for n in neighbors[:k]]
     return knn_neighbors
 
-def transform3d_to_2d(obj1_data, obj2_data, hyperparams):
-    obj1_pos = obj1_data['position']
-    obj1_rot = obj1_data['rotation']
-    obj2_pos = obj2_data['position']
-    w, h = hyperparams['w'], hyperparams['h']
-    fov_v = hyperparams['fov_v']
-    fx, fy, fov_h = get_focal_length(w, h, fov_v)
-    c_point = (w // 2, h // 2)
-    return transform_3d_to_2d(obj1_pos, obj1_rot, obj2_pos, c_point, (fx, fy))
+# def transform3d_to_2d(obj1_data, obj2_data, hyperparams):
+#     obj1_pos = obj1_data['position']
+#     obj1_rot = obj1_data['rotation']
+#     obj2_pos = obj2_data['position']
+#     w, h = hyperparams['w'], hyperparams['h']
+#     fov_v = hyperparams['fov_v']
+#     fx, fy, fov_h = get_focal_length(w, h, fov_v)
+#     hyperparams['fov_h'] = fov_h
+#     c_point = (w // 2, h // 2)
+#     return transform_3d_to_2d(obj1_pos, obj1_rot, obj2_pos, c_point, (fx, fy))
 
 def get_spatial_direction(obj1, obj2, dist, dict_obj, hyperparams):
     w_to_l, p_l, alpha, betha = transform3d_to_2d(dict_obj[obj1], dict_obj[obj2], hyperparams) 
@@ -334,7 +336,7 @@ def parse_args():
     parser.add_argument("--json_path_navigation", type=str)
     parser.add_argument("--json_path_spatial_rels", type=str)
     parser.add_argument("--json_path_trajectories", type=str)
-    parser.add_argument("--episode_key", type=str)
+    # parser.add_argument("--episode_key", type=str)
     args = parser.parse_args()
     return args
 
@@ -344,14 +346,22 @@ def main(args):
     path_json_nav = args.json_path_navigation
     path_json_spat_rels = args.json_path_spatial_rels
     path_json_traj = args.json_path_trajectories
-    episode = args.episode_key
+    # episode = args.episode_key
     W, H = 396, 224
     FOV_V = 59
     dict_nav = get_records_navigation(path_navigation)
     df_obj = pd.read_csv(path_objects)
     # sp_data, spat_ann, traj = get_spatial_relations(dict_nav, episode, df_obj, W, H, FOV_V)
-    graph = create_graph(dict_nav, episode, df_obj, W, H, FOV_V)
-    export_to_json(os.path.join(path_json_nav), graph)
+    hyperparams = {
+        'w': W,
+        'h': H,
+        'fov_v': FOV_V,
+        'epsilon': 1/3,
+        'k_neighbors': 3
+    }
+    graph = create_graph(dict_nav, df_obj, hyperparams)
+    # export_to_json(os.path.join(path_json_nav), graph)
+
     # export_to_json(os.path.join(path_json_nav), sp_data)
     # export_to_json(os.path.join(path_json_spat_rels), spat_ann)
     # export_to_json(os.path.join(path_json_traj), traj)
