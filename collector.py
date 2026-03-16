@@ -93,12 +93,17 @@ class Collector:
     #     dict_data['cmax'].append(bbox[2])
     #     dict_data['rmax'].append(bbox[3])
 
-    def save_data_navigation(self, dict_navigation, key, objects_data, path_image, degrees):
-        # print("key: ", key)
-        for object_data in objects_data:
-            dict_navigation['ag-action'].append(key[0])
-            self.save_data_by_axis(dict_navigation, 'ag-pos', key[1])
-            self.save_data_by_axis(dict_navigation, 'ag-rot', key[2])
+    def save_data_navigation(self, dict_navigation, key): #, objects_data, path_image, degrees):
+        obj_data = self.dict_agent[key]['objects']
+        path_image = self.dict_agent[key]['image']
+        degrees = self.dict_agent[key]['degrees']
+        position = self.dict_agent[key]['position']
+        rotation = self.dict_agent[key]['rotation']
+        for object_data in obj_data:
+            dict_navigation['timestep'].append(key[0])
+            dict_navigation['ag-action'].append(key[1])
+            self.save_data_by_axis(dict_navigation, 'ag-pos', position)
+            self.save_data_by_axis(dict_navigation, 'ag-rot', rotation)
             dict_navigation['degrees'].append(degrees)
             # dict_navigation['obj-type'].append(object_data[0])
             dict_navigation['obj-id'].append(object_data[0])
@@ -112,23 +117,17 @@ class Collector:
         cv2.imwrite(image_name, event.cv2img) 
     
     def get_dict_navigation(self):
-        # dict_navigation = {
-        #     'ag-action': [], 'ag-pos-x': [], 'ag-pos-y': [], 'ag-pos-z': [], 
-        #     'ag-rot-x': [], 'ag-rot-y': [], 'ag-rot-z': [], 'obj-type': [], 
-        #     'obj-id': [], 'obj-pos-x': [], 'obj-pos-y': [], 'obj-pos-z': [], 
-        #     'obj-rot-x': [], 'obj-rot-y': [], 'obj-rot-z': [], 'obj-distance': [],
-        #     'cmin': [], 'rmin': [], 'cmax': [], 'rmax': [], 'path': []
-        #     }
         dict_navigation = {
-            'ag-action': [], 'degrees': [], 'ag-pos-x': [], 'ag-pos-y': [], 'ag-pos-z': [], 
-            'ag-rot-x': [], 'ag-rot-y': [], 'ag-rot-z': [], #'obj-type': [], 
+            'timestep': [], 'ag-action': [], 'degrees': [], 
+            'ag-pos-x': [], 'ag-pos-y': [], 'ag-pos-z': [], 
+            'ag-rot-x': [], 'ag-rot-y': [], 'ag-rot-z': [], 
             'obj-id': [], 'obj-distance': [], 'path': []
-            }
+        }
         for key in self.dict_agent:
-            object_data = self.dict_agent[key]['objects']
-            image_path = self.dict_agent[key]['image']
-            degrees = self.dict_agent[key]['degrees']
-            self.save_data_navigation(dict_navigation, key, object_data, image_path, degrees)
+            # object_data = self.dict_agent[key]['objects']
+            # image_path = self.dict_agent[key]['image']
+            # degrees = self.dict_agent[key]['degrees']
+            self.save_data_navigation(dict_navigation, key) #, object_data, image_path, degrees)
         return dict_navigation
     
     # def save_data_by_axis_bbox(self, dict_objects, base_name, bbox):
@@ -159,14 +158,14 @@ class Collector:
 
     # method called by the room visit task after each action to save the data of the agent and the visible objects
     def collect_data(self, event, action, v_objects):
-        # print("Visible objects: ", v_objects)
         position = self.round_number(event.metadata['agent']['position'], 2)
         rotation = self.round_number(event.metadata['agent']['rotation'], 2)
         action_name = THORActions.get_action_name(action)
-        key = (action_name, position, rotation)
+        key = (self.timestep, action_name)
         if key not in self.dict_agent:
-            self.dict_agent[key] = {'objects': [], 'image': ''}
-            # cond_objs = self.get_object_data(objects)
+            self.dict_agent[key] = {'objects': []}
+            self.dict_agent[key]['position'] = position
+            self.dict_agent[key]['rotation'] = rotation
             self.dict_agent[key]["degrees"] = AGENT_ROTATION_DEG
             cond_objs, objects = self.get_object_data(v_objects)
             self.dict_agent[key]['objects'] = cond_objs

@@ -34,11 +34,12 @@ Usage example:
 
 ```bash
 python -m spatial_description_generation \
- --csv_path_navigation /home/andreina/Documents/Programs/Dataset/Generated/navigation/02_11_2026_19_49_21_223709/navigation.csv \
- --csv_path_objects /home/andreina/Documents/Programs/Dataset/Generated/navigation/02_11_2026_19_49_21_223709/objects.csv \
- --json_path_navigation /home/andreina/Documents/Programs/Dataset/Generated/navigation/02_11_2026_19_49_21_223709/jsons/nav_1.json \
- --json_path_spatial_rels /home/andreina/Documents/Programs/Dataset/Generated/navigation/02_11_2026_19_49_21_223709/jsons/spa_rels_1.json \
- --json_path_trajectories /home/andreina/Documents/Programs/Dataset/Generated/navigation/02_11_2026_19_49_21_223709/jsons/traj_1.json
+ --csv_path_navigation /home/andreina/Documents/Programs/Dataset/Generated/navigation/03_16_2026_15_15_36_850440/navigation.csv \
+ --csv_path_objects /home/andreina/Documents/Programs/Dataset/Generated/navigation/03_16_2026_15_15_36_850440/objects.csv \
+ --json_path_navigation /home/andreina/Documents/Programs/Dataset/Generated/navigation/03_16_2026_15_15_36_850440/jsons/nav_1.json \
+ --json_path_spatial_rels /home/andreina/Documents/Programs/Dataset/Generated/navigation/03_16_2026_15_15_36_850440/jsons/spa_rels_1.json \
+ --json_path_trajectories /home/andreina/Documents/Programs/Dataset/Generated/navigation/03_16_2026_15_15_36_850440/jsons/traj_1.json \
+ --image_path /home/andreina/Documents/Programs/Dataset/Generated/navigation/03_16_2026_15_15_36_850440/image.png
 ```
 
 # --episode_key episode_1
