@@ -40,17 +40,17 @@ class Collector:
         z_min = np.min(array[:, 2])
         return (x_min, y_min, z_min)
     
-    def get_object_data(self, arr_objects):
+    def get_object_data(self, arr_objects, controller):
         objects = set()
         cond_objs = []
-        # detections = controller.last_event.instance_detections2D
+        detections = controller.last_event.instance_detections2D
 
         for obj_dict in arr_objects:
             if not obj_dict['visible']:
                 continue
-            # if not detections.__contains__(obj_dict['objectId']):
-            #     continue
-            # bbox = detections.__getitem__(obj_dict['objectId'])
+            if not detections.__contains__(obj_dict['objectId']):
+                continue
+            bbox = detections.__getitem__(obj_dict['objectId'])
             cond_objs.append([
                 # class label
                 # obj_dict['objectType'],
@@ -65,6 +65,7 @@ class Collector:
                 # euclidean distance from the center-point to the agent
                 np.round(obj_dict['distance'], 4),
                 # bounding box
+                bbox
             ])
             # print("Object: ", obj_dict)
             bbox_name = 'objectOrientedBoundingBox' if obj_dict['objectOrientedBoundingBox'] != None else 'axisAlignedBoundingBox'
@@ -86,12 +87,12 @@ class Collector:
         for (axis, item) in zip(axis_names, array):
             dict_data[base_name + axis].append(item)
 
-    # def save_bbox(self, dict_data, bbox):
-    #     assert len(bbox) == 4, "size error of bbox, it must be of size 4"
-    #     dict_data['cmin'].append(bbox[0])
-    #     dict_data['rmin'].append(bbox[1])
-    #     dict_data['cmax'].append(bbox[2])
-    #     dict_data['rmax'].append(bbox[3])
+    def save_bbox(self, dict_data, bbox):
+        assert len(bbox) == 4, "size error of bbox, it must be of size 4"
+        dict_data['cmin'].append(bbox[0])
+        dict_data['rmin'].append(bbox[1])
+        dict_data['cmax'].append(bbox[2])
+        dict_data['rmax'].append(bbox[3])
 
     def save_data_navigation(self, dict_navigation, key): #, objects_data, path_image, degrees):
         obj_data = self.dict_agent[key]['objects']
@@ -99,18 +100,23 @@ class Collector:
         degrees = self.dict_agent[key]['degrees']
         position = self.dict_agent[key]['position']
         rotation = self.dict_agent[key]['rotation']
+        camera_position = self.dict_agent[key]['camera_position']
+        camera_horizon = self.dict_agent[key]['camera_horizon']
         for object_data in obj_data:
+            # print("Object data: ", object_data)
             dict_navigation['timestep'].append(key[0])
             dict_navigation['ag-action'].append(key[1])
             self.save_data_by_axis(dict_navigation, 'ag-pos', position)
             self.save_data_by_axis(dict_navigation, 'ag-rot', rotation)
+            self.save_data_by_axis(dict_navigation, 'camera-pos', camera_position)
             dict_navigation['degrees'].append(degrees)
             # dict_navigation['obj-type'].append(object_data[0])
             dict_navigation['obj-id'].append(object_data[0])
             # self.save_data_by_axis(dict_navigation, 'obj-pos', object_data[2])
             # self.save_data_by_axis(dict_navigation, 'obj-rot', object_data[3])
             dict_navigation['obj-distance'].append(object_data[1])
-            # self.save_bbox(dict_navigation, object_data[5])
+            self.save_bbox(dict_navigation, object_data[2])
+            dict_navigation['camera-horizon'].append(camera_horizon)
             dict_navigation['path'].append(path_image) 
 
     def save_image(self, image_name, event):
@@ -120,7 +126,9 @@ class Collector:
         dict_navigation = {
             'timestep': [], 'ag-action': [], 'degrees': [], 
             'ag-pos-x': [], 'ag-pos-y': [], 'ag-pos-z': [], 
-            'ag-rot-x': [], 'ag-rot-y': [], 'ag-rot-z': [], 
+            'ag-rot-x': [], 'ag-rot-y': [], 'ag-rot-z': [],
+            'cmin': [], 'rmin': [], 'cmax': [], 'rmax': [], # for saving bbox data 
+            'camera-horizon': [], 'camera-pos-x': [], 'camera-pos-y': [], 'camera-pos-z': [], # additional camera data
             'obj-id': [], 'obj-distance': [], 'path': []
         }
         for key in self.dict_agent:
@@ -152,14 +160,17 @@ class Collector:
             self.save_data_by_axis(dict_objects, 'obj-rot', t[3])
             # dict_objects['parentReceptacles'].append(t[4])
             dict_objects['receptacleObjectIds'].append(t[4])
-            # self.save_data_by_axis_bbox(dict_objects, 'objOrBBox', t[5])
             self.save_data_by_axis(dict_objects, 'objOrBBox', t[5])
         return dict_objects
 
     # method called by the room visit task after each action to save the data of the agent and the visible objects
-    def collect_data(self, event, action, v_objects):
+    def collect_data(self, event, action, v_objects, controller):
+        # print("Metadata agent: ", event.metadata['agent'])
+        # print("Metadata: ", event.metadata)
         position = self.round_number(event.metadata['agent']['position'], 2)
         rotation = self.round_number(event.metadata['agent']['rotation'], 2)
+        camera_position = self.round_number(event.metadata['cameraPosition'], 2)
+        camera_horizon = np.round(event.metadata['agent']['cameraHorizon'], 2)
         action_name = THORActions.get_action_name(action)
         key = (self.timestep, action_name)
         if key not in self.dict_agent:
@@ -167,7 +178,9 @@ class Collector:
             self.dict_agent[key]['position'] = position
             self.dict_agent[key]['rotation'] = rotation
             self.dict_agent[key]["degrees"] = AGENT_ROTATION_DEG
-            cond_objs, objects = self.get_object_data(v_objects)
+            self.dict_agent[key]['camera_horizon'] = camera_horizon
+            self.dict_agent[key]['camera_position'] = camera_position
+            cond_objs, objects = self.get_object_data(v_objects, controller)
             self.dict_agent[key]['objects'] = cond_objs
             if self.data_objects['objects']:
                 self.data_objects['objects'].update(objects)

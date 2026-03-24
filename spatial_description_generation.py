@@ -1,3 +1,4 @@
+import os
 import ast
 import re
 import json
@@ -7,45 +8,55 @@ import pandas as pd
 import cv2
 import seaborn as sns
 
-from spatial_transformation import transform3d_to_2d
+from spatial_transformation import transform3d_to_2d, world_to_local
+from drawer import draw_graph
 
 def get_thresholds(fov, fraction_threshold):
     thr = fraction_threshold * (fov / 2)
     return thr
 
-def get_x_direction(alpha, hyperparams):
-    fov_h = hyperparams['fov_h']
-    thr_h = get_thresholds(fov_h, hyperparams['fraction_threshold'])
+def get_x_direction(x_pos, thr_x):
+    # fov_h = hyperparams['fov_h']
+    # thr_h = get_thresholds(fov_h, hyperparams['fraction_threshold'])
+    # thr_x = hyperparams['ex']
     x_dir = "center-horizontal"
-    if alpha >thr_h:
+    if x_pos > thr_x:
         x_dir = "right"
-    elif alpha < thr_h * -1:
+    elif x_pos < thr_x * -1:
         x_dir = "left"
     return x_dir
 
-def get_y_direction(betha, hyperparams):
-    fov_v = hyperparams["fov_v"]
-    thr_v = get_thresholds(fov_v, hyperparams['fraction_threshold'])
+def get_y_direction(y_pos, thr_y):
+    # fov_v = hyperparams["fov_v"]
+    # thr_v = get_thresholds(fov_v, hyperparams['fraction_threshold'])
+    # thr_y = hyperparams['ey']
     y_dir = "center-vertical"
-    if betha > thr_v:
+    if y_pos > thr_y:
         y_dir = "above"
-    elif betha < thr_v * -1:
+    elif y_pos < thr_y * -1:
         y_dir = "below"
     return y_dir
 
-def get_z_direction(z, hyperparams):
-    z_dir = "undefined"
-    epsilon = hyperparams["epsilon_z"]
-    if z > epsilon:
+def get_z_direction(z_pos, thr_z):
+    # z_dir = "center-depth"
+    # thr_z = hyperparams["ez"]
+    z_dir = "c-d"
+    if z_pos > thr_z:
         z_dir = "front"
-    elif z < epsilon * -1:
+        # z_dir = "f"
+    elif z_pos < thr_z * -1:
         z_dir = "behind"
+        # z_dir = "b"
     return z_dir
 
-def get_direction(alpha, betha, z, hyperparams):
-    x_dir = get_x_direction(alpha, hyperparams) #rirght, left
-    y_dir = get_y_direction(betha, hyperparams) # above, below
-    z_dir = get_z_direction(z, hyperparams) # front, behind
+def get_direction(local_position, hyperparams): #alpha, betha, z, hyperparams):
+    # x_dir = get_x_direction(alpha, hyperparams) #right, left
+    # y_dir = get_y_direction(betha, hyperparams) # above, below
+    # z_dir = get_z_direction(z, hyperparams) # front, behind
+    # return (x_dir, y_dir, z_dir)
+    x_dir = get_x_direction(local_position[0], hyperparams['ex']) #right, left
+    y_dir = get_y_direction(local_position[1], hyperparams['ey']) # above, below
+    z_dir = get_z_direction(local_position[2], hyperparams['ez']) # front, behind
     return (x_dir, y_dir, z_dir)
 
 def transform_text2list(text):
@@ -104,26 +115,20 @@ def get_records_navigation(csv_path):
     dict_navigation = {}
     for _, row in df.iterrows():
         timestep = row.get('timestep')
-        action = row.get("ag-action")
-        degrees = row.get("degrees")
-        ag_pos_x = row.get("ag-pos-x")
-        ag_pos_y = row.get("ag-pos-y")
-        ag_pos_z = row.get("ag-pos-z")
-        ag_rot_x = row.get("ag-rot-x")
-        ag_rot_y = row.get("ag-rot-y")
-        ag_rot_z = row.get("ag-rot-z")
         obj = row.get("obj-id")
-        path = row.get("path")
         if timestep not in dict_navigation:
             dict_navigation[timestep] = {
-                "action": action,
-                "degrees": degrees,
-                "ag_pos": (ag_pos_x, ag_pos_y, ag_pos_z),
-                "ag_rot": (ag_rot_x, ag_rot_y, ag_rot_z),
-                "path": path,
+                "action": row.get("ag-action"),
+                "degrees": row.get("degrees"),
+                # "ag_pos": (row.get("ag-pos-x"), row.get("ag-pos-y"), row.get("ag-pos-z")),
+                "ag_pos": (row.get("camera-pos-x"), row.get("camera-pos-y"), row.get("camera-pos-z")),
+                "ag_rot": (row.get("camera-horizon"), row.get("ag-rot-y"), row.get("ag-rot-z")),
+                "path": row.get("path"),
                 "objects": [],
+                'bboxes': [],
             }
         dict_navigation[timestep]['objects'].append(obj)
+        dict_navigation[timestep]['bboxes'].append((row.get("cmin"), row.get("rmin"), row.get("cmax"), row.get("rmax")))
     return dict_navigation
 
 def create_nodes(dict_navigation, df_obj):
@@ -135,10 +140,14 @@ def create_nodes(dict_navigation, df_obj):
         nodes[timestep]['agent'] = {
             'category': 'agent',
             'position': ag_pos,
-            'rotation': ag_rot
+            'rotation': ag_rot, 
+            'visible': 0, # the agent itself is not visible, but we can save its position and rotation for future use if needed
+            'bbox': (0, 0, 0, 0), # the agent does not have a bbox, but we can save a placeholder for future use if needed
+            # 'bbox3d': (0, 0, 0) # the agent does not have a bbox, but we can save a placeholder for future use if needed
         }
         objects = data['objects']
-        for obj in objects:
+        bboxes = data['bboxes']
+        for obj, bbox in zip(objects, bboxes):
             data_object = df_obj[df_obj['obj-id'] == obj].iloc[0]
             obj_pos = tuple(data_object[['obj-pos-x', 'obj-pos-y', 'obj-pos-z']])
             # obj_rot = tuple(data_object[['obj-rot-x', 'obj-rot-y', 'obj-rot-z']])
@@ -146,9 +155,10 @@ def create_nodes(dict_navigation, df_obj):
             nodes[timestep][obj] = {
                 'category': data_object['obj-type'],
                 'position': obj_pos,
-                'rotation': tuple(data_object[['obj-rot-x', 'obj-rot-y', 'obj-rot-z']]),
+                'rotation': tuple(data_object[['obj-rot-x', 'obj-rot-y', 'obj-rot-z']]),  # for objects is not necessary the riotation, but we can save it for future use if needed
                 'visible': 1, #int(obj in data['objects']),
-                'bbox': tuple(data_object[['objOrBBox-x', 'objOrBBox-y', 'objOrBBox-z']])
+                # 'bbox3d': tuple(data_object[['objOrBBox-x', 'objOrBBox-y', 'objOrBBox-z']]),
+                'bbox': bbox
             }
     return nodes
 
@@ -164,12 +174,94 @@ def get_knn(obj_id, data, k=3):
     knn_neighbors = [n[0] for n in neighbors[:k]]
     return knn_neighbors
 
+def get_x_direction_bbox(x1, x2, hyperparams):
+    ex = hyperparams['ex']
+    dif = x2 - x1
+    if dif < -ex:
+        # dir_x = "left"
+        dir_x = "l"
+    elif np.abs(dif) <= ex:
+        # dir_x = "center-horizontal"
+        dir_x = "c-h"
+    else:
+        # dir_x = "right"
+        dir_x = "r"
+    return dir_x
+
+def get_y_direction_bbox(y1, y2, hyperparams):
+    ey = hyperparams['ey']
+    dif = y2 - y1
+    if dif < -ey:
+        # dir_y = "above"
+        dir_y = "a"
+    elif np.abs(dif) <= ey:
+        # dir_y = "center-vertical"
+        dir_y = "c-v"
+    else:
+        # dir_y = "below"
+        dir_y = "b"
+    return dir_y
+
+def get_direction_bbox(pos1, pos2, hyperparams):
+    x_dir = get_x_direction_bbox(pos1[0], pos2[0], hyperparams) #right, left
+    y_dir = get_y_direction_bbox(pos1[1], pos2[1], hyperparams) # above, below
+    # z_dir = get_z_direction(dist, hyperparams) # front, behind
+    return x_dir, y_dir
+
+def get_spatial_direction_bbox(obj1, obj2, dist, dict_obj, hyperparams):
+    if obj1 == 'agent':
+        pos1 = hyperparams['w'] / 2, hyperparams['h'] / 2, 0
+        # pos2 = get_box_center(dict_obj[obj2]['bbox'])
+        pos2 = dict_obj[obj2]['bbox']
+    elif obj2 == 'agent':
+        # pos1 = get_box_center(dict_obj[obj1]['bbox'])
+        pos1 = dict_obj[obj1]['bbox']
+        pos2 = hyperparams['w'] / 2, hyperparams['h'] / 2, 0
+    else:
+        # pos1 = get_box_center(dict_obj[obj1]['bbox'])
+        # pos2 = get_box_center(dict_obj[obj2]['bbox'])
+        pos1 = dict_obj[obj1]['bbox']
+        pos2 = dict_obj[obj2]['bbox']
+    direction_xy = get_direction_bbox(pos1, pos2, hyperparams)
+    xl, yl, zl = world_to_local(dict_obj[obj1]['position'], dict_obj[obj1]['rotation'], dict_obj[obj2]['position'])
+    dir_z = get_z_direction(zl, hyperparams)
+    return direction_xy[0], direction_xy[1], dir_z
+
+def get_box_center(bbox):
+    x1, y1, x2, y2 = bbox
+    c_x = (x1 + x2) / 2
+    c_y = (y1 + y2) / 2
+    return c_x, c_y
+
+def get_box_center_node(obj_id, dict_obj, hyperparams):
+    if obj_id == 'agent':
+        c_p = hyperparams['w'] / 2, hyperparams['h'] / 2
+    else:
+        c_p = get_box_center(dict_obj[obj_id]['bbox'])
+    return c_p
+
+def get_difference(p1, p2, p_l):
+    dif = np.linalg.norm(np.array(p_l) - np.array(p1))
+    dif2 = np.linalg.norm(np.array(p_l) - np.array(p2))
+    return dif, dif2
+
 def get_spatial_direction(obj1, obj2, dist, dict_obj, hyperparams):
     try:
-        w_to_l, p_l, alpha, betha = transform3d_to_2d(dict_obj[obj1], dict_obj[obj2], hyperparams)
-        (x_l, y_l, z_l) = w_to_l 
-        direction = get_direction(alpha, betha, z_l, hyperparams)
-        text_dist = get_distance_text(dist)
+        if obj1 == 'agent':
+            w_to_l, p_l, alpha, betha = transform3d_to_2d(dict_obj[obj1], dict_obj[obj2], hyperparams)
+        elif obj2 == 'agent':
+            w_to_l, p_l, alpha, betha = transform3d_to_2d(dict_obj[obj2], dict_obj[obj1], hyperparams)
+        else:
+            w_to_l_1, p_l_1, alpha_1, betha_1 = transform3d_to_2d(dict_obj['agent'], dict_obj[obj1], hyperparams)
+            w_to_l_2, p_l_2, alpha_2, betha_2 = transform3d_to_2d(dict_obj['agent'], dict_obj[obj2], hyperparams)
+            w_to_l =  np.array(w_to_l_2) - np.array(w_to_l_1)
+        # direction = None
+        direction = get_direction(w_to_l, hyperparams)
+        # p1 = get_box_center_node(obj1, dict_obj, hyperparams)
+        # p2 = get_box_center_node(obj2, dict_obj, hyperparams)
+        # dif = get_difference(p_l, p1, p2)
+        # print(f"Difference btw transformation 3d to 2d: {p_l}, and box center: obj1 {obj1} with {p1}, obj2 {obj2} with {p2}.")
+        # text_dist = get_distance_text(dist)
     except ValueError as v_e:
         # print(f"Error calculating spatial direction between {obj1} and {obj2}: {v_e}")
         direction = None
@@ -197,29 +289,34 @@ def edges_btw_neighbors(obj_id, neighbors, data, hyperparams):
             print(f"Error creating edge between {obj_id} and {neighbor}: {v_e}")
         except Exception as e:
             print(f"Unexpected error: {e}")
+        # break
     return edges
 
-def draw_local_positions(path, data_nodes, hyperparams, extra_data):
+def draw_local_positions(timestep, path_image, data_nodes, hyperparams, extra_data):
     points = []
     obj_ids = []
     for obj_id, obj_data in data_nodes.items():
         if obj_id != 'agent':
             try:
                 w_to_l, p_l, alpha, betha = transform3d_to_2d(data_nodes['agent'], obj_data, hyperparams)
+                # p_l = get_box_center(obj_data['bbox'])
                 # print(f"Object {obj_id} local position: {w_to_l}, alpha: {alpha}, betha: {betha}")
                 points.append(p_l)
+                # xb, yb, zb = obj_data['bbox']
+                # points.append((xb, yb))
                 obj_ids.append(obj_id)
             except ValueError as v_e:
                 print(f"Error drawing local position for {obj_id}: {v_e}")
             except Exception as e:
                 print(f"Unexpected error: {e}")
-    print(f"Drawing points for path {path}, points: {points}, obj_ids: {obj_ids}")
-    draw_points(path, points, extra_data)
+    print(f"Drawing for timestep: {timestep} points: {points}, obj_ids: {obj_ids}")
+    draw_points(timestep, path_image, points, extra_data)
 
-def draw_points(path, points, extra_data):
-    # path = extra_data['path']
-    other_path = extra_data['other_path']
-    frame = cv2.imread(path)
+def draw_points(timestep, path_image, points, extra_data):
+    # path = extra_data['path_folder']
+    other_path = extra_data['other_folder_path']
+    image_name = "image_" + str(timestep) + ".png"
+    frame = cv2.imread(path_image)
     # u, v = int(round(uv[0])), int(round(uv[1]))
     out = frame.copy()
     cv2.circle(out, (0, 0), 6, (255, 0, 0), -1)
@@ -230,22 +327,23 @@ def draw_points(path, points, extra_data):
         (r, g, b) = (int(255*r), int(255*g), int(255*b))
         cv2.circle(out, (u, v), 6, (r, g, b), -1)
         cv2.putText(out, str(i), (u, v), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
-    cv2.imwrite(other_path, out)
+    cv2.imwrite(os.path.join(other_path, image_name), out)
 
 def create_edges(dict_navigation, nodes, hyperparams, extra_data):
     edges = {}
     for timestep, data in nodes.items():
-        print(f"Creating edges for timestep {timestep} with objects: {list(data.keys())}")
+        # print(f"Creating edges for timestep {timestep} with objects: {list(data.keys())}")
         # create edges btw agent and objects
-        draw_local_positions(dict_navigation[timestep]['path'], data, hyperparams, extra_data)
+        # draw_local_positions(timestep, dict_navigation[timestep]['path'], data, hyperparams, extra_data)
         edges[timestep] = []
         for obj_id in data.keys():
             if obj_id == 'agent':
                 neighbors = data.keys() - {'agent'}
             else:
                 neighbors = get_knn(obj_id, data, k=hyperparams['k_neighbors'])
-            edges[timestep] = edges_btw_neighbors(obj_id, neighbors, data, hyperparams)
-        break
+            edges[timestep].extend(edges_btw_neighbors(obj_id, neighbors, data, hyperparams))
+            # break
+        # break
     return edges
         
 def create_graph(dict_navigation, df_obj, hyperparams, extra_data):
@@ -266,7 +364,8 @@ def parse_args():
     parser.add_argument("--json_path_navigation", type=str)
     parser.add_argument("--json_path_spatial_rels", type=str)
     parser.add_argument("--json_path_trajectories", type=str)
-    parser.add_argument("--image_path", type=str, default="image.png")
+    # parser.add_argument("--folder_path", type=str, default="data/")
+    parser.add_argument("--other_folder_path", type=str, default="")
     # parser.add_argument("--episode_key", type=str)
     args = parser.parse_args()
     return args
@@ -277,7 +376,8 @@ def main(args):
     path_json_nav = args.json_path_navigation
     path_json_spat_rels = args.json_path_spatial_rels
     path_json_traj = args.json_path_trajectories
-    path_image = args.image_path
+    # path_folder = args.folder_path
+    other_folder = args.other_folder_path
     # episode = args.episode_key
     W, H = 396, 224
     FOV_V = 59
@@ -291,14 +391,20 @@ def main(args):
         'fov_v': FOV_V,
         'epsilon': 1/3,
         'k_neighbors': 3,
-        'epsilon_z': 1e-6,
-        'fraction_threshold': 0.15 #0.1 or 0.2
+        'fraction_threshold': 0.15, #0.1 or 0.2
+        'ex': 0.1, # threshold for horizontal direction based on image width
+        'ey': 0.1, # threshold for vertical direction based on image height
+        'ez': 0.1,
     }
     extra_data = {
         'palette': sns.color_palette("Set2", n_colors=10),
-        'other_path': path_image   
+        # 'folder_path': path_folder,
+        'other_folder_path': other_folder
     }        
     graph = create_graph(dict_nav, df_obj, hyperparams, extra_data)
+    # draw_graph(graph)
+    print(f"Graph created with {len(graph['nodes'])} nodes and {len(graph['edges'])} edges.")
+    print(f"Graph: {graph}")
     # print(f"Graph: {graph}, nodes: {len(graph['nodes'])}, edges: {len(graph['edges'])}")
     # export_to_json(os.path.join(path_json_nav), graph)
     # export_to_json(os.path.join(path_json_nav), sp_data)

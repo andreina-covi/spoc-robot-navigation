@@ -9,6 +9,10 @@ Script base:
 This script is for generating csv files with spoc:
 
 ```bash
+. configure_variables.sh
+```
+
+```bash
 python -m training.offline.online_eval --shuffle --eval_subset minival --output_basedir /home/andreina/Documents/Programs/Dataset/logs \
  --test_augmentation --task_type RoomVisit \
  --eval_set_size 1 \
@@ -34,12 +38,12 @@ Usage example:
 
 ```bash
 python -m spatial_description_generation \
- --csv_path_navigation /home/andreina/Documents/Programs/Dataset/Generated/navigation/03_16_2026_15_15_36_850440/navigation.csv \
- --csv_path_objects /home/andreina/Documents/Programs/Dataset/Generated/navigation/03_16_2026_15_15_36_850440/objects.csv \
- --json_path_navigation /home/andreina/Documents/Programs/Dataset/Generated/navigation/03_16_2026_15_15_36_850440/jsons/nav_1.json \
- --json_path_spatial_rels /home/andreina/Documents/Programs/Dataset/Generated/navigation/03_16_2026_15_15_36_850440/jsons/spa_rels_1.json \
- --json_path_trajectories /home/andreina/Documents/Programs/Dataset/Generated/navigation/03_16_2026_15_15_36_850440/jsons/traj_1.json \
- --image_path /home/andreina/Documents/Programs/Dataset/Generated/navigation/03_16_2026_15_15_36_850440/image.png
+ --csv_path_navigation /home/andreina/Documents/Programs/Dataset/Generated/navigation/03_24_2026_16_33_10_043036/navigation.csv \
+ --csv_path_objects /home/andreina/Documents/Programs/Dataset/Generated/navigation/03_24_2026_16_33_10_043036/objects.csv \
+ --json_path_navigation /home/andreina/Documents/Programs/Dataset/Generated/navigation/03_24_2026_16_33_10_043036/jsons/nav_1.json \
+ --json_path_spatial_rels /home/andreina/Documents/Programs/Dataset/Generated/navigation/03_24_2026_16_33_10_043036/jsons/spa_rels_1.json \
+ --json_path_trajectories /home/andreina/Documents/Programs/Dataset/Generated/navigation/03_24_2026_16_33_10_043036/jsons/traj_1.json \
+ --other_folder_path /home/andreina/Documents/Programs/Dataset/Generated/navigation/03_24_2026_16_33_10_043036/draw/
 ```
 
 # --episode_key episode_1
