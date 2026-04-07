@@ -61,13 +61,27 @@ def transform_3d_to_2d(obj1_pos, obj1_rot, obj2_pos, c_point, foc_l, hyperparams
     x_l, y_l, z_l = world_to_local(obj1_pos, obj1_rot, obj2_pos)
     alpha = calculate_angle(x_l, z_l)
     betha = calculate_angle(y_l, z_l)
-    u_l, v_l = projection_with_local_vector((x_l, y_l, z_l), c_point, foc_l, hyperparams)
+    try:
+        u_l, v_l = projection_with_local_vector((x_l, y_l, z_l), c_point, foc_l, hyperparams)
+    except ValueError as e:
+        print(f"Error in projection: {e}")
+        u_l, v_l = None, None
     return (x_l, y_l, z_l), (u_l, v_l), alpha, betha
 
 def transform3d_to_2d(obj1_data, obj2_data, hyperparams):
     obj1_pos = obj1_data['position']
     obj1_rot = obj1_data['rotation']
     obj2_pos = obj2_data['position']
+    w, h = hyperparams['w'], hyperparams['h']
+    fov_v = hyperparams['fov_v']
+    fx, fy, fov_h = get_focal_length(w, h, fov_v)
+    hyperparams['fov_h'] = fov_h
+    hyperparams['fx'] = fx
+    hyperparams['fy'] = fy
+    c_point = (w // 2, h // 2)
+    return transform_3d_to_2d(obj1_pos, obj1_rot, obj2_pos, c_point, (fx, fy), hyperparams)
+
+def transform_3d_to_2d_with_fov(obj1_pos, obj1_rot, obj2_pos, hyperparams):
     w, h = hyperparams['w'], hyperparams['h']
     fov_v = hyperparams['fov_v']
     fx, fy, fov_h = get_focal_length(w, h, fov_v)

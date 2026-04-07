@@ -17,10 +17,9 @@ class Collector:
         # self.graph = {"nodes": {}, "edges": [], "memory": {}}
         # self.actions = []
         self.timestep = 0
-        dt = datetime.datetime.now().strftime("%m_%d_%Y_%H_%M_%S_%f")
-        self.image_path = os.path.join(OBJAVERSE_NAVIGATION_PATH, dt, 'images')
-        self.objects_path = os.path.join(OBJAVERSE_NAVIGATION_PATH, dt, 'objects.csv')
-        self.navigation_path = os.path.join(OBJAVERSE_NAVIGATION_PATH, dt,'navigation.csv')
+        self.scene_name = None
+        self.dt = datetime.datetime.now().strftime("%m_%d_%Y_%H_%M_%S_%f")
+        self.image_path = os.path.join(OBJAVERSE_NAVIGATION_PATH, self.dt, 'images')
 
         os.makedirs(self.image_path, exist_ok=True)
 
@@ -94,30 +93,29 @@ class Collector:
         dict_data['cmax'].append(bbox[2])
         dict_data['rmax'].append(bbox[3])
 
-    def save_data_navigation(self, dict_navigation, key): #, objects_data, path_image, degrees):
-        obj_data = self.dict_agent[key]['objects']
-        path_image = self.dict_agent[key]['image']
-        degrees = self.dict_agent[key]['degrees']
-        position = self.dict_agent[key]['position']
-        rotation = self.dict_agent[key]['rotation']
-        camera_position = self.dict_agent[key]['camera_position']
-        camera_horizon = self.dict_agent[key]['camera_horizon']
-        for object_data in obj_data:
-            # print("Object data: ", object_data)
-            dict_navigation['timestep'].append(key[0])
-            dict_navigation['ag-action'].append(key[1])
-            self.save_data_by_axis(dict_navigation, 'ag-pos', position)
-            self.save_data_by_axis(dict_navigation, 'ag-rot', rotation)
-            self.save_data_by_axis(dict_navigation, 'camera-pos', camera_position)
-            dict_navigation['degrees'].append(degrees)
-            # dict_navigation['obj-type'].append(object_data[0])
-            dict_navigation['obj-id'].append(object_data[0])
-            # self.save_data_by_axis(dict_navigation, 'obj-pos', object_data[2])
-            # self.save_data_by_axis(dict_navigation, 'obj-rot', object_data[3])
-            dict_navigation['obj-distance'].append(object_data[1])
-            self.save_bbox(dict_navigation, object_data[2])
-            dict_navigation['camera-horizon'].append(camera_horizon)
-            dict_navigation['path'].append(path_image) 
+    def add_basic_navigation_data(self, dict_navigation, key):
+        dict_navigation['timestep'].append(key[0])
+        dict_navigation['ag-action'].append(key[1])
+        self.save_data_by_axis(dict_navigation, 'ag-pos', self.dict_agent[key]['position'])
+        self.save_data_by_axis(dict_navigation, 'ag-rot', self.dict_agent[key]['rotation'])
+        self.save_data_by_axis(dict_navigation, 'camera-pos', self.dict_agent[key]['camera_position'])
+        dict_navigation['degrees'].append(self.dict_agent[key]['degrees'])
+        dict_navigation['camera-horizon'].append(self.dict_agent[key]['camera_horizon'])
+        dict_navigation['path'].append(self.dict_agent[key]['image'])
+
+    def save_data_navigation(self, dict_navigation, key):
+        objects_data = self.dict_agent[key]['objects']
+        if not objects_data:
+            self.add_basic_navigation_data(dict_navigation, key)
+            dict_navigation['obj-id'].append(None)
+            dict_navigation['obj-distance'].append(None)
+            self.save_bbox(dict_navigation, [None, None, None, None])
+        else:
+            for object_data in objects_data:
+                self.add_basic_navigation_data(dict_navigation, key)
+                dict_navigation['obj-id'].append(object_data[0])
+                dict_navigation['obj-distance'].append(object_data[1])
+                self.save_bbox(dict_navigation, object_data[2])
 
     def save_image(self, image_name, event):
         cv2.imwrite(image_name, event.cv2img) 
@@ -132,10 +130,7 @@ class Collector:
             'obj-id': [], 'obj-distance': [], 'path': []
         }
         for key in self.dict_agent:
-            # object_data = self.dict_agent[key]['objects']
-            # image_path = self.dict_agent[key]['image']
-            # degrees = self.dict_agent[key]['degrees']
-            self.save_data_navigation(dict_navigation, key) #, object_data, image_path, degrees)
+            self.save_data_navigation(dict_navigation, key)
         return dict_navigation
     
     # def save_data_by_axis_bbox(self, dict_objects, base_name, bbox):
@@ -165,8 +160,8 @@ class Collector:
 
     # method called by the room visit task after each action to save the data of the agent and the visible objects
     def collect_data(self, event, action, v_objects, controller):
-        # print("Metadata agent: ", event.metadata['agent'])
-        # print("Metadata: ", event.metadata)
+        # print("METADATA: ", event.metadata)
+        self.scene_name = event.metadata['sceneName']
         position = self.round_number(event.metadata['agent']['position'], 2)
         rotation = self.round_number(event.metadata['agent']['rotation'], 2)
         camera_position = self.round_number(event.metadata['cameraPosition'], 2)
@@ -194,11 +189,11 @@ class Collector:
             self.timestep += 1
 
     def save_data(self):
+        navigation_path = os.path.join(OBJAVERSE_NAVIGATION_PATH, self.dt, 'navigation-' + self.scene_name + '.csv')
+        objects_path = os.path.join(OBJAVERSE_NAVIGATION_PATH, self.dt, 'objects-' + self.scene_name + '.csv')
         dict_navigation = self.get_dict_navigation()
         df_navigation = pd.DataFrame(dict_navigation)
-        df_navigation.to_csv(self.navigation_path)
+        df_navigation.to_csv(navigation_path)
         dict_objects = self.get_dict_objects()
         df_objects = pd.DataFrame(dict_objects)
-        df_objects.to_csv(self.objects_path)
-
-    
+        df_objects.to_csv(objects_path)

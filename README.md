@@ -25,7 +25,7 @@ python -m training.offline.online_eval --shuffle --eval_subset minival --output_
 This script is for processing and creating spatial descriptions of the csv files
 
 ```bash
-python -m spatial_description_generation \
+python -m spatial_data_generation \
  --csv_path_navigation filename \
  --csv_path_objects filename \
  --json_path_navigation filename \
@@ -37,13 +37,15 @@ python -m spatial_description_generation \
 Usage example:
 
 ```bash
-python -m spatial_description_generation \
- --csv_path_navigation /home/andreina/Documents/Programs/Dataset/Generated/navigation/03_24_2026_16_33_10_043036/navigation.csv \
- --csv_path_objects /home/andreina/Documents/Programs/Dataset/Generated/navigation/03_24_2026_16_33_10_043036/objects.csv \
- --json_path_navigation /home/andreina/Documents/Programs/Dataset/Generated/navigation/03_24_2026_16_33_10_043036/jsons/nav_1.json \
+python -m spatial_data_generation \
+ --csv_path_navigation /home/andreina/Documents/Programs/Dataset/Generated/navigation/04_06_2026_09_24_51_126999/navigation-Procedural.csv \
+ --csv_path_objects /home/andreina/Documents/Programs/Dataset/Generated/navigation/04_06_2026_09_24_51_126999/objects-Procedural.csv \
+--json_path_dict /home/andreina/Documents/Programs/Dataset/Generated/navigation/04_06_2026_09_24_51_126999/jsons/struct-dict.json
+```
+
+<!-- --json_path_navigation /home/andreina/Documents/Programs/Dataset/Generated/navigation/03_24_2026_16_33_10_043036/jsons/nav_1.json \
  --json_path_spatial_rels /home/andreina/Documents/Programs/Dataset/Generated/navigation/03_24_2026_16_33_10_043036/jsons/spa_rels_1.json \
  --json_path_trajectories /home/andreina/Documents/Programs/Dataset/Generated/navigation/03_24_2026_16_33_10_043036/jsons/traj_1.json \
- --other_folder_path /home/andreina/Documents/Programs/Dataset/Generated/navigation/03_24_2026_16_33_10_043036/draw/
-```
+ --other_folder_path /home/andreina/Documents/Programs/Dataset/Generated/navigation/03_24_2026_16_33_10_043036/draw/ -->
 
 # --episode_key episode_1
