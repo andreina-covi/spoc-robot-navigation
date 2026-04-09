@@ -11,11 +11,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 
 from spatial_transformation import transform3d_to_2d, world_to_local, transform_3d_to_2d_with_fov
-from drawer import draw_graph
-
-def get_thresholds(fov, fraction_threshold):
-    thr = fraction_threshold * (fov / 2)
-    return thr
+# from drawer import draw_graph
 
 def get_x_direction(x_pos, thr_x):
     x_dir = "" # center / ignore
@@ -41,6 +37,30 @@ def get_z_direction(z_pos, thr_z):
         z_dir = "behind"
     return z_dir
 
+def get_x_direction_angle(angle_xz, hyperparams):
+    ambiguity = hyperparams['angle_threshold_xz']
+    abs_angle = abs(angle_xz)
+    if abs_angle < ambiguity or abs_angle > (180 - ambiguity):
+        # nearly straight ahead or straight behind → no left/right
+        x_relation = ""
+    elif angle_xz > 0:
+        x_relation = "right"
+    else:
+        x_relation = "left"
+    return x_relation
+
+def get_z_direction_angle(angle_xz, hyperparams):
+    ambiguity = hyperparams['angle_threshold_xz']
+    abs_angle = abs(angle_xz)
+    if abs_angle < (90 - ambiguity):
+        # nearly straight ahead or straight behind → no above/below
+        z_relation = "front"
+    elif abs_angle > (90 + ambiguity):
+        z_relation = "behind"
+    else:
+        z_relation = ""
+    return z_relation
+
 def get_direction(local_position, hyperparams): #alpha, betha, z, hyperparams):
     x_dir = get_x_direction(local_position[0], hyperparams['ex']) #right, left
     y_dir = get_y_direction(local_position[1], hyperparams['ey']) # above, below
@@ -65,10 +85,10 @@ def get_distance_text(number, hyperparams):
     max_dist = hyperparams['max_distance']
     if number <= min_dist:
         text = "close"
-    elif number >= max_dist:
-        text = "far"
-    else:
+    elif number <= max_dist:
         text = "medium"
+    else:
+        text = "far"
     return text
 
 def get_records_navigation(csv_path):
@@ -124,6 +144,15 @@ def get_knn(obj_id, data, hyperparams):
     knn_neighbors = [n[0] for n in neighbors[:k]]
     return knn_neighbors
 
+def get_direction_angle(diff, hyperparams):
+    x, y, z = diff
+    angle_xz = math.atan2(x, z) * 180 / math.pi
+    # angle_yz = math.atan2(y, z) * 180 / math.pi
+    x_dir = get_x_direction_angle(angle_xz, hyperparams)
+    z_dir = get_z_direction_angle(angle_xz, hyperparams)
+    y_dir = get_y_direction(y, hyperparams['ey'])
+    return (x_dir, y_dir, z_dir)
+
 def edges_btw_neighbors(obj_id, neighbors, data, hyperparams, last_seen=-1, extra_data=None):
     edges = []
     local_position_object = np.array(data[obj_id]['local_position'])
@@ -131,13 +160,15 @@ def edges_btw_neighbors(obj_id, neighbors, data, hyperparams, last_seen=-1, extr
         local_position_neighbor = np.array(data[neighbor]['local_position'])
         dist = np.linalg.norm(local_position_object - local_position_neighbor)
         dist_text = get_distance_text(dist, hyperparams)
-        direction = get_direction(local_position_neighbor - local_position_object, \
-                                    hyperparams)
+        diff = local_position_neighbor - local_position_object
+        direction = get_direction(diff, hyperparams)
+        angle_direction = get_direction_angle(diff, hyperparams)
         edge = {
             'source': obj_id,
             'target': neighbor,
             'distance': dist_text,
             'relation': direction,
+            'angle_relation': angle_direction,
             'inferred': False if last_seen < 0 else True# this can be calculated based on distance or other factors
         }
         if last_seen >= 0:
@@ -234,9 +265,9 @@ def collect_episode_data(dict_navigation, df_obj, hyperparams, extra_data=None):
         episode_dict['steps'].append(step_dict)
     return episode_dict
 
-def export_to_json(path_dict, data):
+def export_to_json(path_dict, data, json_filename="structured_data.json"):
     os.makedirs(path_dict, exist_ok=True)
-    filename = os.path.join(path_dict, "structured_data.json")
+    filename = os.path.join(path_dict, json_filename)
     with open(filename, "w") as f:
         json.dump(data, f, indent=4)
 
@@ -246,6 +277,7 @@ def parse_args():
     parser.add_argument("--csv_path_objects", type=str)
     parser.add_argument("--json_path_dict", type=str)
     parser.add_argument("--other_folder_path", type=str, default="")
+    parser.add_argument("--json_filename", type=str, default="structured_data.json")
     args = parser.parse_args()
     return args
 
@@ -265,6 +297,7 @@ def main(args):
     path_objects = args.csv_path_objects
     path_json_dict = args.json_path_dict
     other_folder = args.other_folder_path
+    json_filename = args.json_filename
     W, H = 396, 224
     FOV_V = 59
     dict_nav = get_records_navigation(path_navigation)
@@ -280,8 +313,9 @@ def main(args):
         'ex': 0.1, # threshold for horizontal direction based on image width
         'ey': 0.1, # threshold for vertical direction based on image height
         'ez': 0.15,
-        'min_distance': 1.5, # threshold for close distance,
-        'max_distance': 3.0 # threshold for far distance
+        'angle_threshold_xz': 15, # threshold for ambiguity in angle-based direction (in degrees)
+        'min_distance': 0.5, # threshold for close distance,
+        'max_distance': 1.5 # threshold for far distance
     }
     extra_data = {
         'palette': sns.color_palette("Set2", n_colors=10),
@@ -292,8 +326,8 @@ def main(args):
     }        
     episode_dict = collect_episode_data(dict_nav, df_obj, hyperparams, extra_data)
     # print(f"Episode data collected: {episode_dict}")
-    draw_distances(extra_data['all_distances'])
-    # export_to_json(path_json_dict, episode_dict)
+    # draw_distances(extra_data['all_distances'])
+    export_to_json(path_json_dict, episode_dict, json_filename)
 
 if __name__ == '__main__':
     args = parse_args()
