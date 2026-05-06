@@ -38,9 +38,9 @@ Usage example:
 
 ```bash
 python -m spatial_data_generation \
- --csv_path_navigation /home/andreina/Documents/Programs/Dataset/Generated/navigation/04_06_2026_09_24_51_126999/navigation-Procedural.csv \
- --csv_path_objects /home/andreina/Documents/Programs/Dataset/Generated/navigation/04_06_2026_09_24_51_126999/objects-Procedural.csv \
---json_path_dict /home/andreina/Documents/Programs/Dataset/Generated/navigation/04_06_2026_09_24_51_126999/jsons \
+ --csv_path_navigation /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_03_2026_20_17_10_197610/navigation-Procedural.csv \
+ --csv_path_objects /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_03_2026_20_17_10_197610/objects-Procedural.csv \
+--json_path_dict /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_03_2026_20_17_10_197610/jsons \
 --json_filename structured_data_angle.json
 ```
 
@@ -48,10 +48,17 @@ python -m spatial_data_generation \
 
 Usage example:
 
-```
+```bash
 python -m qa_generator_refined \
- --input /home/andreina/Documents/Programs/Dataset/Generated/navigation/04_06_2026_09_24_51_126999/jsons/structured_data_angle.json \
- --output /home/andreina/Documents/Programs/Dataset/Generated/navigation/04_06_2026_09_24_51_126999/jsons/qa_generated_with_template.json
+ --input /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_03_2026_20_17_10_197610/jsons/structured_data_angle.json \
+ --output /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_03_2026_20_17_10_197610/jsons/qa_generated_with_template.json
+```
+
+```bash
+python qa_generator.py \
+  /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_03_2026_20_17_10_197610/jsons/structured_data_angle.json
+  /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_03_2026_20_17_10_197610/benchmark
+  traj_001
 ```
 
 <!-- --json_path_navigation /home/andreina/Documents/Programs/Dataset/Generated/navigation/03_24_2026_16_33_10_043036/jsons/nav_1.json \

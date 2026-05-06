@@ -20,6 +20,7 @@ class Collector:
         self.scene_name = None
         self.dt = datetime.datetime.now().strftime("%m_%d_%Y_%H_%M_%S_%f")
         self.image_path = os.path.join(OBJAVERSE_NAVIGATION_PATH, self.dt, 'images')
+        self.dict_colors = {}
 
         os.makedirs(self.image_path, exist_ok=True)
 
@@ -43,7 +44,13 @@ class Collector:
         objects = set()
         cond_objs = []
         detections = controller.last_event.instance_detections2D
-
+        # colors = controller.last_event.instance_segmentation_colors
+        # colors = controller.last_event.metadata['colors']
+        # dict_colors = {d['name']: d['color'] for d in colors}
+        # print("colors: ", colors)
+        # print("objects: ", arr_objects)
+        # print("objects", controller.last_event.metadata['objects'])
+        # print("metadata", controller.last_event.metadata)
         for obj_dict in arr_objects:
             if not obj_dict['visible']:
                 continue
@@ -68,10 +75,14 @@ class Collector:
             ])
             # print("Object: ", obj_dict)
             bbox_name = 'objectOrientedBoundingBox' if obj_dict['objectOrientedBoundingBox'] != None else 'axisAlignedBoundingBox'
+            # print('dict_colors', dict_colors)
+            # print('color', dict_colors[obj_dict['objectId']])
             objects.add((
                 obj_dict['objectType'],
                 # self.get_name_object(obj_dict['name']),
                 obj_dict['objectId'],
+                # color
+                tuple(self.dict_colors[obj_dict['objectId']]),
                 # obj_dict['name'],
                 tuple(self.round_number(obj_dict['position'], 2)),
                 tuple(self.round_number(obj_dict['rotation'], 2)),
@@ -144,24 +155,29 @@ class Collector:
 
     def get_dict_objects(self):
         dict_objects = {
-            'obj-type': [], 'obj-id': [], 'obj-pos-x': [], 'obj-pos-y': [], 'obj-pos-z': [],
+            'obj-type': [], 'obj-id': [], 'obj-color': [], 'obj-pos-x': [], 'obj-pos-y': [], 'obj-pos-z': [],
             'obj-rot-x': [], 'obj-rot-y': [], 'obj-rot-z': [], #'parentReceptacles': [],
             'receptacleObjectIds': [], 'objOrBBox-x': [], 'objOrBBox-y': [], 'objOrBBox-z': []
         }
         for t in self.data_objects['objects']:
             dict_objects['obj-type'].append(t[0])
             dict_objects['obj-id'].append(t[1])
-            self.save_data_by_axis(dict_objects, 'obj-pos', t[2])
-            self.save_data_by_axis(dict_objects, 'obj-rot', t[3])
+            dict_objects['obj-color'].append(t[2])
+            self.save_data_by_axis(dict_objects, 'obj-pos', t[3])
+            self.save_data_by_axis(dict_objects, 'obj-rot', t[4])
             # dict_objects['parentReceptacles'].append(t[4])
-            dict_objects['receptacleObjectIds'].append(t[4])
-            self.save_data_by_axis(dict_objects, 'objOrBBox', t[5])
+            dict_objects['receptacleObjectIds'].append(t[5])
+            self.save_data_by_axis(dict_objects, 'objOrBBox', t[6])
         return dict_objects
 
     # method called by the room visit task after each action to save the data of the agent and the visible objects
     def collect_data(self, event, action, v_objects, controller):
         # print("METADATA: ", event.metadata)
-        self.scene_name = event.metadata['sceneName']
+        self.scene_name = event.metadata['sceneName'] # ["seed"]
+        # print("Scene name: ", self.scene_name)
+        if not self.dict_colors:
+            self.dict_colors = {d['name']: d['color'] for d in event.metadata['colors']}
+
         position = self.round_number(event.metadata['agent']['position'], 2)
         rotation = self.round_number(event.metadata['agent']['rotation'], 2)
         camera_position = self.round_number(event.metadata['cameraPosition'], 2)

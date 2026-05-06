@@ -82,13 +82,15 @@ def get_distance_text(number, hyperparams):
     # this method can be improved by using the actual distribution of distances in the dataset 
     # to define the thresholds for near, medium, and far. For now, we are using fixed thresholds for simplicity.
     min_dist = hyperparams['min_distance']
-    max_dist = hyperparams['max_distance']
+    med_dist = hyperparams['med_distance']
+    # max_dist = hyperparams['max_distance']
+
     if number <= min_dist:
-        text = "close"
-    elif number <= max_dist:
-        text = "medium"
+        text = "within reach"
+    elif number <= med_dist:
+        text = "nearby"
     else:
-        text = "far"
+        text = "visible"
     return text
 
 def get_records_navigation(csv_path):
@@ -158,16 +160,17 @@ def edges_btw_neighbors(obj_id, neighbors, data, hyperparams, last_seen=-1, extr
     local_position_object = np.array(data[obj_id]['local_position'])
     for neighbor in neighbors:
         local_position_neighbor = np.array(data[neighbor]['local_position'])
-        dist = np.linalg.norm(local_position_object - local_position_neighbor)
+        dist = np.linalg.norm(local_position_neighbor - local_position_object)
         dist_text = get_distance_text(dist, hyperparams)
         diff = local_position_neighbor - local_position_object
-        direction = get_direction(diff, hyperparams)
+        # direction = get_direction(diff, hyperparams)
         angle_direction = get_direction_angle(diff, hyperparams)
         edge = {
             'source': obj_id,
             'target': neighbor,
-            'distance': dist_text,
-            'relation': direction,
+            'distance_metric': np.round(dist, 2),
+            'distance_label': dist_text,
+            # 'relation': direction,
             'angle_relation': angle_direction,
             'inferred': False if last_seen < 0 else True# this can be calculated based on distance or other factors
         }
@@ -234,12 +237,26 @@ def collect_episode_data(dict_navigation, df_obj, hyperparams, extra_data=None):
     episode_dict = {
         'scene': extra_data['scene'],
         # 'episode_id': extra_data['episode_id'],
+        'thresholds': {
+            'distance': {
+                "within_reach": [0.0, hyperparams["min_distance"]],
+                "nearby": [hyperparams["min_distance"], hyperparams["med_distance"]],
+                "far": [hyperparams["med_distance"], hyperparams["max_distance"]]
+            },
+            'relation': {
+                'lateral_deg': hyperparams['angle_threshold_xz'],
+                'vertical_m': hyperparams['ey'],    
+                'depth_deg': hyperparams['angle_threshold_xz']
+            }
+        },
+        'movement_constant': hyperparams['mov_constant'],
         'steps': []
     }
     seen_objects_memory = {}
     for timestep, data in dict_navigation.items():
         step_dict = {
             'step': timestep,
+            'image_path': data['path'],
             'action': data['action'],
             'degrees': data['degrees'],
             'agent': {
@@ -314,8 +331,10 @@ def main(args):
         'ey': 0.1, # threshold for vertical direction based on image height
         'ez': 0.15,
         'angle_threshold_xz': 15, # threshold for ambiguity in angle-based direction (in degrees)
-        'min_distance': 0.5, # threshold for close distance,
-        'max_distance': 1.5 # threshold for far distance
+        'min_distance': 0.5, # threshold for very close distance,
+        'med_distance': 1.0, # threshold for medium distance,
+        'max_distance': 1.5, # threshold for visible distance,
+        'mov_constant': 0.2  # this can be gotten from THOR /utils/constants/stretch_initialization_utils.py
     }
     extra_data = {
         'palette': sns.color_palette("Set2", n_colors=10),
