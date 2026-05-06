@@ -10,13 +10,14 @@ Tasks: T1 (visible agent-object), T2 (non-visible agent-object),
 Input:  one JSON file per trajectory (your graph structure)
 Output: questions.json, answers.json, metadata.json
 """
-
+import sys
 import json
 import uuid
 import random
 import itertools
 from pathlib import Path
-
+sys.path.append("../")
+from spatial_data_generation import get_records_objects
 
 # ---------------------------------------------------------------------------
 # CONFIGURATION
@@ -155,7 +156,7 @@ def shuffle_options(correct_label: str, distractors: list) -> tuple:
 
 def generate_T1(step: dict, traj_id: str, scene: str,
                 q_counter: dict, actions=None, thresholds=None,
-                mov_constant=None) -> tuple:
+                mov_constant=None, nav_path=None) -> tuple:
     """
     Returns (questions, answers, metadata) lists for this step.
     q_counter is a mutable dict {"n": int} for unique IDs across steps.
@@ -433,7 +434,7 @@ def get_action_sequence_text(actions_since: list, degrees: int, mov_constant: fl
 
 def generate_T2(step: dict, traj_id: str, scene: str,
                 q_counter: dict, actions: dict, thresholds: list,
-                mov_constant=float) -> tuple:
+                mov_constant: float, nav_path: str=None) -> tuple:
     questions, answers, metadata = [], [], []
     step_id    = step["step"]
     image_path = step.get("image_path", "")
@@ -532,7 +533,7 @@ def generate_T2(step: dict, traj_id: str, scene: str,
 
 def generate_T3(step: dict, traj_id: str, scene: str,
                 q_counter: dict, actions: dict, thresholds: list,
-                mov_constant=float) -> tuple:
+                mov_constant: float, nav_path: str=None) -> tuple:
     questions, answers, metadata = [], [], []
     step_id    = step["step"]
     image_path = step.get("image_path", "")
@@ -622,7 +623,8 @@ def generate_T3(step: dict, traj_id: str, scene: str,
 # ---------------------------------------------------------------------------
 
 def generate_T4(step: dict, traj_id: str, scene: str,
-                q_counter: dict) -> tuple:
+                q_counter: dict, actions: dict, thresholds: list,
+                mov_constant: float, nav_path: str=None) -> tuple:
     questions, answers, metadata = [], [], []
     step_id    = step["step"]
     image_path = step.get("image_path", "")
@@ -635,21 +637,21 @@ def generate_T4(step: dict, traj_id: str, scene: str,
     agent_edges = [e for e in edges
                    if e["source"] == "agent"
                    and not e.get("inferred", False)
-                   and e.get("distance") in DISTANCE_LABELS]
+                   and e.get("distance_label") in DISTANCE_LABELS]
 
     if len(agent_edges) < 3:
         return questions, answers, metadata
 
     # ── T4-M3: rank 3 objects nearest to farthest ────────────────────────
-    dist_order = {"near": 0, "medium": 1, "far": 2}
+    dist_order = {"whithin reach": 0, "nearby": 1, "visible": 2}
     # sample triplets
     for triple in itertools.combinations(agent_edges, 3):
-        dists = [dist_order[e["distance"]] for e in triple]
+        dists = [dist_order[e["distance_label"]] for e in triple]
         # skip if any two have same distance (ambiguous ordering)
         if len(set(dists)) < 3:
             continue
 
-        sorted_triple = sorted(triple, key=lambda e: dist_order[e["distance"]])
+        sorted_triple = sorted(triple, key=lambda e: dist_order[e["distance_label"]])
         cats = [
             vis_objs.get(e["target"], {}).get("category", parse_category(e["target"]))
             for e in sorted_triple
@@ -699,14 +701,14 @@ def generate_T4(step: dict, traj_id: str, scene: str,
             "trajectory_id": traj_id,
             "step_id":       step_id,
             "object_ids":    [e["target"] for e in sorted_triple],
-            "distances":     [e["distance"] for e in sorted_triple],
+            "distances":     [e["distance_label"] for e in sorted_triple],
             "axis1_uttal":   "extrinsic-static",
             "axis2_frame":   "egocentric",
             "axis3_scale":   "landmark",
         })
 
         # limit to first valid triplet per step to avoid explosion
-        break
+        # break
 
     return questions, answers, metadata
 
@@ -715,8 +717,19 @@ def generate_T4(step: dict, traj_id: str, scene: str,
 # T6 — TOPOLOGICAL RELATIONS (DC, EC, NTPP via receptacleObjectIds)
 # ---------------------------------------------------------------------------
 
+def bbox_gap(bbox_a: list, bbox_b: list) -> list:
+    # bbox format: {"center": [x,y,z], "size": [sx,sy,sz]}
+    # gap on each axis = max(0, |center_diff| - (size_a + size_b) / 2)
+    gaps = []
+    for i in range(3):
+        center_diff = abs(bbox_a["center"][i] - bbox_b["center"][i])
+        half_sum = (bbox_a["size"][i] + bbox_b["size"][i]) / 2
+        gaps.append(max(0, center_diff - half_sum))
+    return gaps
+
 def generate_T6(step: dict, traj_id: str, scene: str,
-                q_counter: dict, raw_step: dict = None) -> tuple:
+                q_counter: dict, actions: dict, thresholds: list,
+                mov_constant=float, obj_path: str=None) -> tuple:
     """
     T6 uses receptacle information to determine topological relations.
     raw_step should contain the full THOR metadata with receptacleObjectIds.
@@ -730,6 +743,7 @@ def generate_T6(step: dict, traj_id: str, scene: str,
     image_path = step.get("image_path", "")
     vis_objs   = step.get("visible_objects", {})
     edges      = step.get("edges_visible", [])
+    obj_dict   = get_records_objects(obj_path) if obj_path else {}
 
     for obj_id, obj_data in vis_objs.items():
         category = obj_data.get("category", parse_category(obj_id))
@@ -741,7 +755,8 @@ def generate_T6(step: dict, traj_id: str, scene: str,
             other_cat = other_data.get("category", parse_category(other_id))
 
             # NTPP: obj_id is inside other_id (receptacle)
-            other_receptacles = other_data.get("receptacleObjectIds", [])
+            other_receptacles = obj_dict[other_id].get('receptacleObjectIds', [])
+            # other_receptacles = other_data.get("receptacleObjectIds", [])
             if obj_id in other_receptacles:
                 correct_label = "inside"
                 distractors   = ["touching", "separate from"]
@@ -788,15 +803,15 @@ def generate_T6(step: dict, traj_id: str, scene: str,
                 })
                 continue
 
-            # EC: both visible, distance is near, not inside each other
+            # EC: both visible, and they are externally connected / touching
             edge = edge_lookup(edges, "agent", obj_id)
             other_edge = edge_lookup(edges, "agent", other_id)
-            obj_in_other = obj_id in other_data.get("receptacleObjectIds", [])
-            other_in_obj = other_id in obj_data.get("receptacleObjectIds", [])
+            obj_in_other = obj_id in obj_dict[other_id].get("receptacleObjectIds", [])  # other_data.get("receptacleObjectIds", [])
+            other_in_obj = other_id in obj_dict[obj_id].get("receptacleObjectIds", [])  # obj_data.get("receptacleObjectIds", [])
 
             if (edge and other_edge
-                    and edge.get("distance") == "near"
-                    and other_edge.get("distance") == "near"
+                    and edge.get("distance_label") == "within reach"
+                    and other_edge.get("distance_label") == "within reach"
                     and not obj_in_other and not other_in_obj):
                 correct_label = "touching"
                 distractors   = ["inside", "separate from"]
@@ -850,7 +865,8 @@ def generate_T6(step: dict, traj_id: str, scene: str,
 # ---------------------------------------------------------------------------
 
 def generate_benchmark(input_path: str, output_dir: str,
-                        trajectory_id: str = None, tuple_task: tuple = ()) -> None:
+                        trajectory_id: str = None, tuple_task: tuple = (),
+                        obj_path: str = "") -> None:
     input_path = Path(input_path)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -873,7 +889,7 @@ def generate_benchmark(input_path: str, output_dir: str,
         actions[step.get("step")] = step.get("action", "unknown")
         # for generator in [generate_T1, generate_T2]: #,
                           #generate_T3, generate_T4, generate_T6]:
-        qs, ans, meta = generator(step, traj_id, scene, q_counter, actions, thresholds, mov_constant)
+        qs, ans, meta = generator(step, traj_id, scene, q_counter, actions, thresholds, mov_constant, obj_path)
         all_questions.extend(qs)
         all_answers.extend(ans)
         all_metadata.extend(meta)
@@ -909,8 +925,10 @@ if __name__ == "__main__":
     input_json   = sys.argv[1]
     output_dir   = sys.argv[2]
     traj_id      = sys.argv[3] if len(sys.argv) > 3 else None
+    index        = int(sys.argv[4]) if len(sys.argv) > 4 else 3
+    nav_path     = sys.argv[5] if len(sys.argv) > 5 else None
     tasks = [(1, generate_T1), (2, generate_T2), (3, generate_T3), (4, generate_T4), (6, generate_T6)]
-    generate_benchmark(input_json, output_dir, traj_id, tasks[2])
+    generate_benchmark(input_json, output_dir, traj_id, tasks[index], nav_path)
 
 
 # def parse_args():

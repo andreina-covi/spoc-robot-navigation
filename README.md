@@ -48,17 +48,18 @@ python -m spatial_data_generation \
 
 Usage example:
 
-```bash
+<!-- ```bash
 python -m qa_generator_refined \
  --input /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_03_2026_20_17_10_197610/jsons/structured_data_angle.json \
  --output /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_03_2026_20_17_10_197610/jsons/qa_generated_with_template.json
-```
+``` -->
 
 ```bash
 python qa_generator.py \
-  /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_03_2026_20_17_10_197610/jsons/structured_data_angle.json
-  /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_03_2026_20_17_10_197610/benchmark
-  traj_001
+  /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_03_2026_20_17_10_197610/jsons/structured_data_angle.json \
+  /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_03_2026_20_17_10_197610/benchmark \
+  traj_001 \
+  0
 ```
 
 <!-- --json_path_navigation /home/andreina/Documents/Programs/Dataset/Generated/navigation/03_24_2026_16_33_10_043036/jsons/nav_1.json \

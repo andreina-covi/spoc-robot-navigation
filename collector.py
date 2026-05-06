@@ -51,6 +51,7 @@ class Collector:
         # print("objects: ", arr_objects)
         # print("objects", controller.last_event.metadata['objects'])
         # print("metadata", controller.last_event.metadata)
+        pos_dict_default = {'x': 0.0, 'y': 0.0, 'z': 0.0}
         for obj_dict in arr_objects:
             if not obj_dict['visible']:
                 continue
@@ -74,7 +75,8 @@ class Collector:
                 bbox
             ])
             # print("Object: ", obj_dict)
-            bbox_name = 'objectOrientedBoundingBox' if obj_dict['objectOrientedBoundingBox'] != None else 'axisAlignedBoundingBox'
+            # bbox_name = 'objectOrientedBoundingBox' if obj_dict['objectOrientedBoundingBox'] != None else 'axisAlignedBoundingBox'
+            bbox_name = 'axisAlignedBoundingBox' if obj_dict['axisAlignedBoundingBox'] != None else 'objectOrientedBoundingBox'
             # print('dict_colors', dict_colors)
             # print('color', dict_colors[obj_dict['objectId']])
             objects.add((
@@ -88,8 +90,12 @@ class Collector:
                 tuple(self.round_number(obj_dict['rotation'], 2)),
                 # obj_dict['parentReceptacles'],
                 tuple(obj_dict['receptacleObjectIds']) if obj_dict['receptacleObjectIds'] != None else (),
-                self.get_min_by_axis(obj_dict[bbox_name]["cornerPoints"])
+                # self.get_min_by_axis(obj_dict[bbox_name]["cornerPoints"])
+                tuple(self.round_number(obj_dict[bbox_name].get("center", pos_dict_default), 2)),
+                tuple(self.round_number(obj_dict[bbox_name].get("size", pos_dict_default), 2))
             ))
+            # print(bbox_name, objects)
+            # break
         return cond_objs , objects
     
     def save_data_by_axis(self, dict_data, base_name, array):
@@ -155,9 +161,11 @@ class Collector:
 
     def get_dict_objects(self):
         dict_objects = {
-            'obj-type': [], 'obj-id': [], 'obj-color': [], 'obj-pos-x': [], 'obj-pos-y': [], 'obj-pos-z': [],
+            'obj-type': [], 'obj-id': [], 'obj-color': [], 
+            'obj-pos-x': [], 'obj-pos-y': [], 'obj-pos-z': [],
             'obj-rot-x': [], 'obj-rot-y': [], 'obj-rot-z': [], #'parentReceptacles': [],
-            'receptacleObjectIds': [], 'objOrBBox-x': [], 'objOrBBox-y': [], 'objOrBBox-z': []
+            'receptacleObjectIds': [], 'bBox-center-x': [], 'bBox-center-y': [], 'bBox-center-z': [],
+            'size-x': [], 'size-y': [], 'size-z': []
         }
         for t in self.data_objects['objects']:
             dict_objects['obj-type'].append(t[0])
@@ -167,7 +175,8 @@ class Collector:
             self.save_data_by_axis(dict_objects, 'obj-rot', t[4])
             # dict_objects['parentReceptacles'].append(t[4])
             dict_objects['receptacleObjectIds'].append(t[5])
-            self.save_data_by_axis(dict_objects, 'objOrBBox', t[6])
+            self.save_data_by_axis(dict_objects, 'bBox-center', t[6])
+            self.save_data_by_axis(dict_objects, 'size', t[7])
         return dict_objects
 
     # method called by the room visit task after each action to save the data of the agent and the visible objects
