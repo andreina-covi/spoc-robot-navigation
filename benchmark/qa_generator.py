@@ -722,10 +722,49 @@ def bbox_gap(bbox_a: list, bbox_b: list) -> list:
     # gap on each axis = max(0, |center_diff| - (size_a + size_b) / 2)
     gaps = []
     for i in range(3):
-        center_diff = abs(bbox_a["center"][i] - bbox_b["center"][i])
+        center_diff = abs(bbox_a["bbox-c"][i] - bbox_b["bbox-c"][i])
         half_sum = (bbox_a["size"][i] + bbox_b["size"][i]) / 2
         gaps.append(max(0, center_diff - half_sum))
     return gaps
+
+def classify_rcc8(obj_a_id, obj_b_id, obj_a, obj_b, obj_dict, tolerance=0.05):
+    """
+    Returns RCC-8 relation of A with respect to B.
+    Requires bbox with "center" and "size" fields per object.
+    """
+    a_inside_b = obj_a_id in obj_dict[obj_b_id].get("receptacleObjectIds", []) # obj_b.get("receptacleObjectIds", [])
+    b_inside_a = obj_b_id in obj_dict[obj_a_id].get("receptacleObjectIds", []) # obj_a.get("receptacleObjectIds", [])
+
+    if a_inside_b:
+        return "NTPP"
+    if b_inside_a:
+        return "NTPPi"
+
+    center_a = obj_dict[obj_a_id].get("bbox-c")
+    center_b = obj_dict[obj_b_id].get("bbox-c")
+    size_a = obj_dict[obj_a_id].get("size")
+    size_b = obj_dict[obj_b_id].get("size")
+
+    gaps = []
+    interior_overlaps = []
+    for i in range(3):
+        center_diff = abs(center_a[i] - center_b[i])
+        half_sum = (size_a[i] + size_b[i]) / 2
+        gap = center_diff - half_sum
+        gaps.append(gap)
+        interior_overlaps.append(gap < 0)
+
+    max_gap = max(gaps)
+    interiors_overlap = all(interior_overlaps)
+
+    if interiors_overlap:
+        return "PO"
+    if max_gap < tolerance:
+        return "EC"
+    return "DC"
+
+def get_question(**args):
+    pass
 
 def generate_T6(step: dict, traj_id: str, scene: str,
                 q_counter: dict, actions: dict, thresholds: list,
@@ -742,7 +781,6 @@ def generate_T6(step: dict, traj_id: str, scene: str,
     step_id    = step["step"]
     image_path = step.get("image_path", "")
     vis_objs   = step.get("visible_objects", {})
-    edges      = step.get("edges_visible", [])
     obj_dict   = get_records_objects(obj_path) if obj_path else {}
 
     for obj_id, obj_data in vis_objs.items():
@@ -753,110 +791,252 @@ def generate_T6(step: dict, traj_id: str, scene: str,
             if other_id == obj_id:
                 continue
             other_cat = other_data.get("category", parse_category(other_id))
+            topological_relations = classify_rcc8(obj_id, other_id, obj_data, other_data, obj_dict)
+            sub_questions = []
+            match topological_relations:
+                case "DC":
+                    question = (
+                        f"How are the {category.lower()} and the {other_cat.lower()} "
+                        f"spatially related? "
+                    )
+                    correct_label = "separate"
+                    distractors   = ["touching", "inside", "overlapping"]
+                    options, correct_key = shuffle_options(correct_label, distractors)
+                    q_counter["n"] += 1
+                    template_id = "T6-DC-M"
+                    qid = make_question_id("T6", "DC-M", q_counter["n"])
+                    rcc8_relation = "DC"
+                    sub_questions.append({
+                        "qid": qid,
+                        "template_id": template_id,
+                        "question": question,
+                        "options": options,
+                        "correct_key": correct_key,
+                        "correct_label": correct_label,
+                        "rcc8_relation": rcc8_relation,
+                    })
+                    # add binary case for T6-DC-B
+                    question = (
+                        f"Are the {category.lower()} and the {other_cat.lower()} in contact "
+                        f"with each other?"
+                    )
+                    correct_label = "No"
+                    distractors   = ["Yes"]
+                    options, correct_key = shuffle_options(correct_label, distractors)
+                    q_counter["n"] += 1
+                    template_id = "T6-DC-B"
+                    qid = make_question_id("T6", "DC-B", q_counter["n"])
+                    rcc8_relation = "DC"
+                    sub_questions.append({
+                        "qid": qid,
+                        "template_id": template_id,
+                        "question": question,
+                        "options": options,
+                        "correct_key": correct_key,
+                        "correct_label": correct_label,
+                        "rcc8_relation": rcc8_relation,
+                    })
+                case "EC":
+                    question = (
+                        f"How are the {category.lower()} and the {other_cat.lower()} "
+                        f"spatially related? "
+                    )
+                    correct_label = "touching"
+                    distractors   = ["separate", "inside", "overlapping"]
+                    options, correct_key = shuffle_options(correct_label, distractors)
+                    q_counter["n"] += 1
+                    template_id = "T6-EC-M"
+                    qid = make_question_id("T6", "EC-M", q_counter["n"])
+                    rcc8_relation = "EC"
+                    sub_questions.append({
+                        "qid": qid,
+                        "template_id": template_id,
+                        "question": question,
+                        "options": options,
+                        "correct_key": correct_key,
+                        "correct_label": correct_label,
+                        "rcc8_relation": rcc8_relation,
+                    })
+                    # add binary case for T6-EC-B
+                    question = (
+                        f"Are the {category.lower()} and the {other_cat.lower()} in contact "
+                        f"with each other?"
+                    )
+                    correct_label = "Yes"
+                    distractors   = ["No"]
+                    options, correct_key = shuffle_options(correct_label, distractors)
+                    q_counter["n"] += 1
+                    template_id = "T6-EC-B"
+                    qid = make_question_id("T6", "EC-B", q_counter["n"])
+                    rcc8_relation = "EC"
+                    sub_questions.append({
+                        "qid": qid,
+                        "template_id": template_id,
+                        "question": question,
+                        "options": options,
+                        "correct_key": correct_key,
+                        "correct_label": correct_label,
+                        "rcc8_relation": rcc8_relation,
+                    })
+                case "PO":
+                    question = (
+                        f"How are the {category.lower()} and the {other_cat.lower()} "
+                        f"spatially related? "
+                    )
+                    correct_label = "overlapping"
+                    distractors   = ["touching", "inside", "separate"]
+                    options, correct_key = shuffle_options(correct_label, distractors)
+                    q_counter["n"] += 1
+                    template_id = "T6-PO-M"
+                    qid = make_question_id("T6", "PO-M", q_counter["n"])
+                    rcc8_relation = "PO"
+                    sub_questions.append({
+                        "qid": qid,
+                        "template_id": template_id,
+                        "question": question,
+                        "options": options,
+                        "correct_key": correct_key,
+                        "correct_label": correct_label,
+                        "rcc8_relation": rcc8_relation,
+                    })
+                    # add binary case for T6-PO-B
+                    question = (
+                        f"Do the {category.lower()} and the {other_cat.lower()} partially overlap?"
+                    )
+                    correct_label = "Yes"
+                    distractors   = ["No"]
+                    options, correct_key = shuffle_options(correct_label, distractors)
+                    q_counter["n"] += 1
+                    template_id = "T6-PO-B"
+                    qid = make_question_id("T6", "PO-B", q_counter["n"])
+                    rcc8_relation = "PO"
+                    sub_questions.append({
+                        "qid": qid,
+                        "template_id": template_id,
+                        "question": question,
+                        "options": options,
+                        "correct_key": correct_key,
+                        "correct_label": correct_label,
+                        "rcc8_relation": rcc8_relation,
+                    })
+                case "NTTP":
+                    question = (
+                        f"How are the {category.lower()} and the {other_cat.lower()} "
+                        f"spatially related? "
+                    )
+                    correct_label = "inside"
+                    distractors   = ["touching", "separate", "overlapping"]
+                    options, correct_key = shuffle_options(correct_label, distractors)
+                    q_counter["n"] += 1
+                    template_id = "T6-NTTP-M"
+                    qid = make_question_id("T6", "NTTP-M", q_counter["n"])
+                    rcc8_relation = "NTTP"
+                    sub_questions.append({
+                        "qid": qid,
+                        "template_id": template_id,
+                        "question": question,
+                        "options": options,
+                        "correct_key": correct_key,
+                        "correct_label": correct_label,
+                        "rcc8_relation": rcc8_relation,
+                    })
+                    # add binary case for T6-DC-B
+                    question = (
+                        f"Are the {category.lower()} and the {other_cat.lower()} in contact "
+                        f"with each other?"
+                    )
+                    correct_label = "Yes"
+                    distractors   = ["No"]
+                    options, correct_key = shuffle_options(correct_label, distractors)
+                    q_counter["n"] += 1
+                    template_id = "T6-NTTP-B"
+                    qid = make_question_id("T6", "NTTP-B", q_counter["n"])
+                    rcc8_relation = "NTTP"
+                    sub_questions.append({
+                        "qid": qid,
+                        "template_id": template_id,
+                        "question": question,
+                        "options": options,
+                        "correct_key": correct_key,
+                        "correct_label": correct_label,
+                        "rcc8_relation": rcc8_relation,
+                    })
+                case "NTPPi":
+                    question = (
+                        f"How are the {other_cat.lower()} and the {category.lower()} "
+                        f"spatially related? "
+                    )
+                    correct_label = "inside"
+                    distractors   = ["touching", "separate", "overlapping"]
+                    options, correct_key = shuffle_options(correct_label, distractors)
+                    q_counter["n"] += 1
+                    template_id = "T6-NTTPi-M"
+                    qid = make_question_id("T6", "NTTPi-M", q_counter["n"])
+                    rcc8_relation = "NTTPi"
+                    sub_questions.append({
+                        "qid": qid,
+                        "template_id": template_id,
+                        "question": question,
+                        "options": options,
+                        "correct_key": correct_key,
+                        "correct_label": correct_label,
+                        "rcc8_relation": rcc8_relation,
+                    })
+                    # add binary case for T6-NTTPi-B
+                    question = (
+                        f"Are the {other_cat.lower()} and the {category.lower()} in contact "
+                        f"with each other?"
+                    )
+                    correct_label = "Yes"
+                    distractors   = ["No"]
+                    options, correct_key = shuffle_options(correct_label, distractors)
+                    q_counter["n"] += 1
+                    template_id = "T6-NTTPi-B"
+                    qid = make_question_id("T6", "NTTPi-B", q_counter["n"])
+                    rcc8_relation = "NTTPi"
+                    sub_questions.append({
+                        "qid": qid,
+                        "template_id": template_id,
+                        "question": question,
+                        "options": options,
+                        "correct_key": correct_key,
+                        "correct_label": correct_label,
+                        "rcc8_relation": rcc8_relation,
+                    })
 
-            # NTPP: obj_id is inside other_id (receptacle)
-            other_receptacles = obj_dict[other_id].get('receptacleObjectIds', [])
-            # other_receptacles = other_data.get("receptacleObjectIds", [])
-            if obj_id in other_receptacles:
-                correct_label = "inside"
-                distractors   = ["touching", "separate from"]
-                options, correct_key = shuffle_options(correct_label, distractors)
-
-                q_counter["n"] += 1
-                qid = make_question_id("T6", "NTPP", q_counter["n"])
-
+            for dict_q in sub_questions:
                 questions.append({
-                    "question_id":   qid,
+                    "question_id":   dict_q["qid"],
                     "trajectory_id": traj_id,
                     "scene":         scene,
                     "step_id":       step_id,
                     "image_path":    image_path,
                     "task_type":     "T6",
-                    "template_id":   "T6-NTPP",
+                    "template_id":   dict_q["template_id"],
                     "object_id_a":   obj_id,
                     "object_id_b":   other_id,
                     "object_type_a": category,
                     "object_type_b": other_cat,
-                    "question": (
-                        f"What is the topological relation between "
-                        f"the {category.lower()} and "
-                        f"the {other_cat.lower()}?"
-                    ),
-                    "options": options,
+                    "question": dict_q["question"],
+                    "options": dict_q["options"],
                 })
                 answers.append({
-                    "question_id":    qid,
-                    "correct_option": correct_key,
-                    "correct_label":  correct_label,
-                    "rcc8_relation":  "NTPP",
+                    "question_id":    dict_q["qid"],
+                    "correct_option": dict_q["correct_key"],
+                    "correct_label":  dict_q["correct_label"],
+                    "rcc8_relation":  dict_q["rcc8_relation"],
                 })
                 metadata.append({
-                    "question_id":   qid,
+                    "question_id":   dict_q["qid"],
                     "trajectory_id": traj_id,
                     "step_id":       step_id,
                     "object_id_a":   obj_id,
                     "object_id_b":   other_id,
-                    "rcc8":          "NTPP",
+                    "rcc8":          dict_q["rcc8_relation"],
                     "axis1_uttal":   "extrinsic-static",
                     "axis2_frame":   "allocentric",
                     "axis3_scale":   "landmark",
                 })
-                continue
-
-            # EC: both visible, and they are externally connected / touching
-            edge = edge_lookup(edges, "agent", obj_id)
-            other_edge = edge_lookup(edges, "agent", other_id)
-            obj_in_other = obj_id in obj_dict[other_id].get("receptacleObjectIds", [])  # other_data.get("receptacleObjectIds", [])
-            other_in_obj = other_id in obj_dict[obj_id].get("receptacleObjectIds", [])  # obj_data.get("receptacleObjectIds", [])
-
-            if (edge and other_edge
-                    and edge.get("distance_label") == "within reach"
-                    and other_edge.get("distance_label") == "within reach"
-                    and not obj_in_other and not other_in_obj):
-                correct_label = "touching"
-                distractors   = ["inside", "separate from"]
-                options, correct_key = shuffle_options(correct_label, distractors)
-
-                q_counter["n"] += 1
-                qid = make_question_id("T6", "EC", q_counter["n"])
-
-                questions.append({
-                    "question_id":   qid,
-                    "trajectory_id": traj_id,
-                    "scene":         scene,
-                    "step_id":       step_id,
-                    "image_path":    image_path,
-                    "task_type":     "T6",
-                    "template_id":   "T6-EC",
-                    "object_id_a":   obj_id,
-                    "object_id_b":   other_id,
-                    "object_type_a": category,
-                    "object_type_b": other_cat,
-                    "question": (
-                        f"What is the spatial relationship between "
-                        f"the {category.lower()} and "
-                        f"the {other_cat.lower()}?"
-                    ),
-                    "options": options,
-                })
-                answers.append({
-                    "question_id":    qid,
-                    "correct_option": correct_key,
-                    "correct_label":  correct_label,
-                    "rcc8_relation":  "EC",
-                })
-                metadata.append({
-                    "question_id":   qid,
-                    "trajectory_id": traj_id,
-                    "step_id":       step_id,
-                    "object_id_a":   obj_id,
-                    "object_id_b":   other_id,
-                    "rcc8":          "EC",
-                    "axis1_uttal":   "extrinsic-static",
-                    "axis2_frame":   "allocentric",
-                    "axis3_scale":   "landmark",
-                })
-
     return questions, answers, metadata
 
 
