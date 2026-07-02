@@ -38,9 +38,9 @@ Usage example:
 
 ```bash
 python -m spatial_data_generation \
- --csv_path_navigation /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_03_2026_20_17_10_197610/navigation-Procedural.csv \
- --csv_path_objects /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_03_2026_20_17_10_197610/objects-Procedural.csv \
---json_path_dict /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_03_2026_20_17_10_197610/jsons \
+ --csv_path_navigation /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_06_2026_17_02_54_768901/navigation-Procedural.csv \
+ --csv_path_objects /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_06_2026_17_02_54_768901/objects-Procedural.csv \
+--json_path_dict /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_06_2026_17_02_54_768901/jsons \
 --json_filename structured_data_angle.json
 ```
 
@@ -56,10 +56,10 @@ python -m qa_generator_refined \
 
 ```bash
 python qa_generator.py \
-  /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_03_2026_20_17_10_197610/jsons/structured_data_angle.json \
-  /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_03_2026_20_17_10_197610/benchmark \
-  traj_001 \
-  0
+  /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_06_2026_17_02_54_768901/jsons/structured_data_angle.json \
+  /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_06_2026_17_02_54_768901/benchmark \
+  traj_001 4 \
+  /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_06_2026_17_02_54_768901/objects-Procedural.csv
 ```
 
 <!-- --json_path_navigation /home/andreina/Documents/Programs/Dataset/Generated/navigation/03_24_2026_16_33_10_043036/jsons/nav_1.json \

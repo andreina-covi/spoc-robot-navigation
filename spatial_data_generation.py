@@ -121,13 +121,17 @@ def get_records_objects(csv_path):
     df = pd.read_csv(csv_path)
     dict_objects = {}
     for _, row in df.iterrows():
+        # print("row", row)
         dict_objects[row.get('obj-id')] = {
             'obj-type': row.get('obj-type'),
             'obj-pos': (row.get('obj-pos-x'), row.get('obj-pos-y'), row.get('obj-pos-z')),
             'obj-rot': (row.get('obj-rot-x'), row.get('obj-rot-y'), row.get('obj-rot-z')),
             'receptacleObjectIds': transform_text2list(row.get('receptacleObjectIds')),
-            'bbox': (row.get("cmin"), row.get("rmin"), row.get("cmax"), row.get("rmax"))
+            # 'bbox': (row.get("cmin"), row.get("rmin"), row.get("cmax"), row.get("rmax"))
+            'bbox-c': (row.get("bBox-center-x"), row.get("bBox-center-y"), row.get("bBox-center-z")),
+            'size': (row.get("size-x"), row.get("size-y"), row.get("size-z"))
         }
+        # break
     return dict_objects
 
 def get_knn(obj_id, data, hyperparams):

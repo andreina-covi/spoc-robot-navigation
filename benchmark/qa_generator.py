@@ -589,7 +589,7 @@ def generate_T3(step: dict, traj_id: str, scene: str,
                 "object_type_a": cat_a,
                 "object_type_b": cat_b,
                 "question": (
-                    f"From your current viewpoint, where is "
+                    f"From your current viewpoint, in which direction is "
                     f"the {cat_b.lower()} relative to "
                     f"the {cat_a.lower()}?"
                 ),
