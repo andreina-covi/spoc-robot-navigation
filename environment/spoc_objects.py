@@ -103,6 +103,20 @@ class SPOCObject(dict):
             or key in self.annotation
         )
 
+    def get(self, key, default=None):
+        """dict.get compatible with _thor_obj-backed storage.
+
+        Note: builtin dict.get does not call __getitem__ on subclasses that only
+        override __getitem__, so without this method .get('pickupable', False)
+        always returns the default.
+        """
+        if key not in self:
+            return default
+        try:
+            return self[key]
+        except (KeyError, ValueError):
+            return default
+
     def __eq__(self, other):
         if not isinstance(other, SPOCObject):
             return False

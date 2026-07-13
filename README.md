@@ -3,56 +3,110 @@
 This repository is an extended version of [SPOC](https://github.com/allenai/spoc-robot-training) (AllenAI, 2024).
 It introduces new modules for spatial-semantic grounding, map-based navigation, and multimodal integration.
 
+**For agents continuing data-collection / cm-benchmark work**, read:
 
-Script base:
+→ **[docs/DATA_COLLECTION.md](docs/DATA_COLLECTION.md)** — design of `Collector`, RoomVisit invisible displacement, output schemas, realism rules, performance notes, QA usage, and known fixes.
 
-This script is for generating csv files with spoc:
+---
+
+## 1. Environment setup
 
 ```bash
 . configure_variables.sh
 ```
 
+This sets (edit paths in `configure_variables.sh` if needed):
+
+- `OBJAVERSE_DATA_DIR`
+- `OBJAVERSE_HOUSES_DIR`
+- `OBJAVERSE_NAVIGATION_PATH` — where episode CSVs / images are written
+
+---
+
+## 2. Collect RoomVisit episodes (with invisible displacement + survey logs)
+
+`RoomVisitTask` uses `Collector` during navigation. While the agent explores:
+
+1. Pickupable objects seen in the **nav camera** are tracked.
+2. After they leave the nav FOV for ≥2 steps, they may be relocated **in the same room** via `PlaceObjectAtPoint`, **only if the new pose stays out of the nav camera** (no pop-in).
+3. On episode end (`done`), logs are saved under `$OBJAVERSE_NAVIGATION_PATH/<timestamp>/`.
+
+Run a short eval (1 episode):
+
 ```bash
-python -m training.offline.online_eval --shuffle --eval_subset minival --output_basedir /home/andreina/Documents/Programs/Dataset/logs \
- --test_augmentation --task_type RoomVisit \
- --eval_set_size 1 \
- --input_sensors raw_navigation_camera raw_manipulation_camera last_actions an_object_is_in_hand \
- --house_set objaverse --wandb_logging False --num_workers 1 \
- --gpu_devices 0 --training_run_id SigLIP-ViTb-3-CHORES-S --local_checkpoint_dir /home/andreina/Documents/Programs/Dataset/checkpoints
+. configure_variables.sh
+
+python -m training.offline.online_eval --shuffle --eval_subset minival \
+  --output_basedir /home/andreina/Documents/Programs/Dataset/logs \
+  --test_augmentation --task_type RoomVisit \
+  --eval_set_size 1 \
+  --input_sensors raw_navigation_camera raw_manipulation_camera last_actions an_object_is_in_hand \
+  --house_set objaverse --wandb_logging False --num_workers 1 \
+  --gpu_devices 0 \
+  --training_run_id SigLIP-ViTb-3-CHORES-S \
+  --local_checkpoint_dir /home/andreina/Documents/Programs/Dataset/checkpoints
 ```
 
+Increase `--eval_set_size` for more episodes. Details, schemas, and QA recipes: [docs/DATA_COLLECTION.md](docs/DATA_COLLECTION.md).
 
-This script is for processing and creating spatial descriptions of the csv files
+### Output folder layout
+
+```text
+$OBJAVERSE_NAVIGATION_PATH/<MM_DD_YYYY_HH_MM_SS_ffffff>/
+  images/
+  navigation-house_XXXXXX.csv
+  objects-house_XXXXXX.csv
+  doors-house_XXXXXX.csv
+  object_state-house_XXXXXX.csv
+  displacement_events-house_XXXXXX.csv
+  displacement_debug-house_XXXXXX.csv
+  passage_state-house_XXXXXX.csv
+  region_trajectory-house_XXXXXX.csv
+  world_layout-house_XXXXXX.json
+  episode_meta-house_XXXXXX.json          # episode_id, episode_kind, counts
+```
+
+Scene tag is `house_<index>` (not `Procedural`). Episode identity is the **folder** + `episode_meta` (not repeated on every CSV row).
+
+---
+
+## 3. Review collected data
+
+```bash
+ls -lt "$OBJAVERSE_NAVIGATION_PATH" | head
+export RUN="$OBJAVERSE_NAVIGATION_PATH/<timestamp>"
+export SCENE=house_XXXXXX
+cat "$RUN/episode_meta-${SCENE}.json"
+```
+
+Check `num_displacements`, then `displacement_events-*.csv` and the corresponding `object_state` track (`in_camera_fov` true → false → move while false).  
+Full review snippets and question examples: [docs/DATA_COLLECTION.md](docs/DATA_COLLECTION.md) §§7–8.
+
+---
+
+## 4. Post-process spatial descriptions (existing pipeline)
 
 ```bash
 python -m spatial_data_generation \
- --csv_path_navigation filename \
- --csv_path_objects filename \
- --json_path_navigation filename \
- --json_path_spatial_rels filename \
- --json_path_trajectories filename
+  --csv_path_navigation "$RUN/navigation-${SCENE}.csv" \
+  --csv_path_objects "$RUN/objects-${SCENE}.csv" \
+  --json_path_dict "$RUN/jsons" \
+  --json_filename structured_data_angle.json
 ```
-# --episode_key string
 
-Usage example:
+Example (legacy `Procedural` name; new runs use `house_XXXXXX`):
 
 ```bash
 python -m spatial_data_generation \
- --csv_path_navigation /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_06_2026_17_02_54_768901/navigation-Procedural.csv \
- --csv_path_objects /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_06_2026_17_02_54_768901/objects-Procedural.csv \
---json_path_dict /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_06_2026_17_02_54_768901/jsons \
---json_filename structured_data_angle.json
+  --csv_path_navigation /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_06_2026_17_02_54_768901/navigation-Procedural.csv \
+  --csv_path_objects /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_06_2026_17_02_54_768901/objects-Procedural.csv \
+  --json_path_dict /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_06_2026_17_02_54_768901/jsons \
+  --json_filename structured_data_angle.json
 ```
 
-# --generate_qa
+---
 
-Usage example:
-
-<!-- ```bash
-python -m qa_generator_refined \
- --input /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_03_2026_20_17_10_197610/jsons/structured_data_angle.json \
- --output /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_03_2026_20_17_10_197610/jsons/qa_generated_with_template.json
-``` -->
+## 5. Generate QA (legacy spatial templates)
 
 ```bash
 python qa_generator.py \
@@ -62,9 +116,16 @@ python qa_generator.py \
   /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_06_2026_17_02_54_768901/objects-Procedural.csv
 ```
 
-<!-- --json_path_navigation /home/andreina/Documents/Programs/Dataset/Generated/navigation/03_24_2026_16_33_10_043036/jsons/nav_1.json \
- --json_path_spatial_rels /home/andreina/Documents/Programs/Dataset/Generated/navigation/03_24_2026_16_33_10_043036/jsons/spa_rels_1.json \
- --json_path_trajectories /home/andreina/Documents/Programs/Dataset/Generated/navigation/03_24_2026_16_33_10_043036/jsons/traj_1.json \
- --other_folder_path /home/andreina/Documents/Programs/Dataset/Generated/navigation/03_24_2026_16_33_10_043036/draw/ -->
+For **invisible displacement / survey** items, use `object_state`, `displacement_events`, and `world_layout` (see [docs/DATA_COLLECTION.md](docs/DATA_COLLECTION.md)).
 
-# --episode_key episode_1
+---
+
+## 6. Code entry points
+
+| File | Role |
+|------|------|
+| `docs/DATA_COLLECTION.md` | Full design context for agents |
+| `tasks/room_visit_task.py` | RoomVisit step loop, hidden relocation, layout |
+| `collector.py` | CSV/JSON logging, visibility tracking |
+| `environment/spoc_objects.py` | `SPOCObject.get()` fix |
+| `configure_variables.sh` | Dataset / navigation paths |
