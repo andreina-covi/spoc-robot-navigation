@@ -6,9 +6,6 @@
 
 This document summarizes **why** collection was extended, **how** it works, **what files** are written, known pitfalls, and how logs support QA for `invisible_displacement` / survey constructs.
 
-Related brief (external):  
-`/home/andreina/Documents/Reuniones/prompt_extend_AI2THOR.md` (cm-benchmark field specs).
-
 ---
 
 ## 1. Goal
