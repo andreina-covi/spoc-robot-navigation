@@ -12,9 +12,9 @@ from environment.stretch_controller import StretchController
 from tasks.abstract_task import AbstractSPOCTask
 from utils.distance_calculation_utils import position_dist
 from utils.type_utils import RewardConfig, THORActions
+from utils.constants.object_constants import is_exportable_object
 from training.online.reward.reward_shaper import RoomVisitRewardShaper
 from collector import Collector
-
 
 class RoomVisitTask(AbstractSPOCTask):
     task_type_str = "RoomVisit"
@@ -70,10 +70,15 @@ class RoomVisitTask(AbstractSPOCTask):
         # ProcTHOR metadata sceneName is always "Procedural"; identify by house_index
         house_index = self.task_info.get("house_index", "unknown")
         scene_name = f"house_{str(house_index).zfill(6)}"
+        # Online eval may pass max_steps=-1 at construction, then patch task.max_steps
+        # later. Treat non-positive as unset; _step syncs the real horizon.
+        collector_max_steps = max_steps if (max_steps is not None and max_steps > 0) else None
         self.collector = Collector(
             scene_name=scene_name,
             episode_kind="invisible_displacement",
             max_displacements=5,
+            max_steps=collector_max_steps,
+            flush_every=50,
         )
         self.collector.set_world_layout(self.build_world_layout())
         self._displacements_this_step = 0
@@ -260,8 +265,44 @@ class RoomVisitTask(AbstractSPOCTask):
             pass
         return None
 
+    def _gather_fov_all_objects(self, detections) -> List[Any]:
+        """Metadata for named non-structural objects with pixels in the nav camera.
+
+        Used for navigation-*.csv and objects-*.csv (spatial-relation candidates).
+        Excludes walls/floors/ceilings/rooms and numeric-only ids (e.g. ``2|4``).
+        Agent–room relations use current-room / region_trajectory instead.
+        """
+        if detections is None:
+            return []
+        result = []
+        fov_ids = list(detections.keys())
+        if not fov_ids:
+            return result
+        with self.controller.include_object_metadata_context():
+            by_id = {
+                o["objectId"]: o
+                for o in self.controller.controller.last_event.metadata["objects"]
+            }
+        for oid in fov_ids:
+            if not is_exportable_object(object_id=oid):
+                continue
+            obj = None
+            if oid in by_id:
+                obj = by_id[oid]
+            else:
+                try:
+                    obj = self.controller.get_object(oid)
+                except Exception:
+                    continue
+            if obj is None:
+                continue
+            if not is_exportable_object(obj_type=obj.get("objectType"), object_id=oid):
+                continue
+            result.append(obj)
+        return result
+
     def _gather_fov_pickupable_meta(self, detections) -> Dict[str, Any]:
-        """Metadata only for pickupable objects currently in the nav FOV."""
+        """Pickupable objects in nav FOV — used only for displacement tracking."""
         if detections is None:
             return {}
         pickupable_ids = self._ensure_pickupable_ids()
@@ -708,11 +749,15 @@ class RoomVisitTask(AbstractSPOCTask):
         self._took_sub_done_action = False
         self._displacements_this_step = 0
 
+        # Eval patches task.max_steps after __init__; keep collector in sync
+        if self.max_steps is not None and self.max_steps > 0:
+            self.collector.max_steps = self.max_steps
+
         if action_str == THORActions.done:
             self._took_end_action = True
             self._success = self.successful_if_done()
             self.last_action_success = self._success
-            self.collector.save_data()
+            self.collector.save_data(reason="done")
         elif action_str == THORActions.sub_done:
             self.num_sub_done += 1
             self._took_sub_done_action = True
@@ -726,52 +771,61 @@ class RoomVisitTask(AbstractSPOCTask):
         else:
             event = self.controller.agent_step(action=action_str)
             self.last_action_success = bool(event)
-            detections = self.controller.controller.last_event.instance_detections2D
-            if (
-                self.controller.controller.last_event.instance_segmentation_frame is None
-                or detections is None
-            ):
-                print("instance segmentation is none")
-            else:
-                # 1) Track pickupables in nav FOV only (not every detection / wall)
-                pickupable_meta = self._gather_fov_pickupable_meta(detections)
-                self.collector.update_visibility_tracking(detections, pickupable_meta)
+            # Skip expensive FOV logging once the collector step budget is full
+            if not self.collector.at_capacity:
+                detections = self.controller.controller.last_event.instance_detections2D
+                if (
+                    self.controller.controller.last_event.instance_segmentation_frame is None
+                    or detections is None
+                ):
+                    print("instance segmentation is none")
+                else:
+                    raw_detections = (
+                        self.controller.controller.last_event.instance_detections2D or {}
+                    )
+                    # Export: named non-structural FOV objects (+ visibility metrics in CSV)
+                    export_dets = self.collector.filter_export_detections(raw_detections)
+                    objects = self._gather_fov_all_objects(export_dets)
+                    objects_by_id = {o["objectId"]: o for o in objects}
 
-                # 2) Relocate objects that were seen, then left nav FOV (same room)
-                self.maybe_displace_hidden_objects(detections)
+                    # Displacement "seen": only recognizable (shown % / size thresholds)
+                    recognizable = self.collector.filter_recognizable_detections(
+                        export_dets,
+                        self.controller.controller,
+                        objects_by_id=objects_by_id,
+                    )
 
-                # 3) Log nav detections for pickupables only (avoids GetObject per wall/floor)
-                detections = self.controller.controller.last_event.instance_detections2D or {}
-                pickupable_ids = self._ensure_pickupable_ids()
-                objects = []
-                for oid in detections.keys():
-                    if oid not in pickupable_ids:
-                        continue
-                    try:
-                        objects.append(self.controller.get_object(oid))
-                    except Exception:
-                        continue
-                current_room = self.get_current_room()
-                room_info = {
-                    "current_room": current_room,
-                    "current_room_type": (
-                        self.room_type_dict.get(current_room) if current_room is not None else None
-                    ),
-                    "seen_rooms": list(self.seen_rooms),
-                }
-                door_states = self.get_door_states()
-                object_states = self._build_object_state_rows(detections)
-                self.collector.collect_data(
-                    event,
-                    action_str,
-                    objects,
-                    self.controller.controller,
-                    room_info=room_info,
-                    door_states=door_states,
-                    action_success=self.last_action_success,
-                    held_obj_id=self._get_held_obj_id(),
-                    object_states=object_states,
-                )
+                    # 1) Discover pickupables only when recognizable; "hidden" uses raw FOV
+                    pickupable_meta = self._gather_fov_pickupable_meta(recognizable)
+                    self.collector.update_visibility_tracking(raw_detections, pickupable_meta)
+
+                    # 2) Relocate when out of ALL nav pixels
+                    self.maybe_displace_hidden_objects(raw_detections)
+
+                    # 3) Log named non-structural FOV objects; post-process uses metrics
+                    current_room = self.get_current_room()
+                    room_info = {
+                        "current_room": current_room,
+                        "current_room_type": (
+                            self.room_type_dict.get(current_room)
+                            if current_room is not None
+                            else None
+                        ),
+                        "seen_rooms": list(self.seen_rooms),
+                    }
+                    door_states = self.get_door_states()
+                    object_states = self._build_object_state_rows(raw_detections)
+                    self.collector.collect_data(
+                        event,
+                        action_str,
+                        objects,
+                        self.controller.controller,
+                        room_info=room_info,
+                        door_states=door_states,
+                        action_success=self.last_action_success,
+                        held_obj_id=self._get_held_obj_id(),
+                        object_states=object_states,
+                    )
 
             position = self.controller.get_current_agent_position()
             self.path.append(position)
@@ -780,6 +834,14 @@ class RoomVisitTask(AbstractSPOCTask):
                 self.travelled_distance += position_dist(
                     p0=self.path[-1], p1=self.path[-2], ignore_y=True
                 )
+
+        # Horizon end (no agent `done`): still export CSVs up to max_steps
+        if (
+            not self._took_end_action
+            and self.num_steps_taken() + 1 >= self.max_steps
+        ):
+            self.collector.save_data(reason="max_steps")
+
         step_result = RLStepResult(
             observation=self.get_observations(),
             reward=self.judge(),

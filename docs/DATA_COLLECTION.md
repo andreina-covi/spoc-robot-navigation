@@ -29,10 +29,10 @@ Episode kind tagged in meta: `invisible_displacement` (RoomVisit still does norm
 online_eval (RoomVisit)
   └─ RoomVisitTask._step
        ├─ agent_step (nav)
-       ├─ track pickupables in instance_detections2D (nav camera)
-       ├─ maybe_displace_hidden_objects()   # PlaceObjectAtPoint, same room
-       ├─ Collector.collect_data(...)       # CSVs / images
-       └─ on done → Collector.save_data()
+       ├─ log visible non-structural FOV objects → navigation / objects CSV
+       ├─ track pickupables only → object_state + maybe_displace_hidden_objects()
+       ├─ Collector.collect_data(...)   # capped at max_steps; flushes every 50 steps
+       └─ on done OR max_steps → Collector.save_data()
 ```
 
 | Module | Role |
@@ -50,22 +50,77 @@ Scene naming: ProcTHOR `sceneName` is always `"Procedural"`. Files use `house_<z
 Path: `$OBJAVERSE_NAVIGATION_PATH/<timestamp>/`  
 (`configure_variables.sh` sets `OBJAVERSE_NAVIGATION_PATH`).
 
+Each episode root has **two** sibling folders:
+
 ```text
 <timestamp>/
-  images/img_<t>.png
-  navigation-house_XXXXXX.csv
-  objects-house_XXXXXX.csv
-  doors-house_XXXXXX.csv
-  object_state-house_XXXXXX.csv
-  displacement_events-house_XXXXXX.csv
-  displacement_debug-house_XXXXXX.csv
-  passage_state-house_XXXXXX.csv
-  region_trajectory-house_XXXXXX.csv
-  world_layout-house_XXXXXX.json
-  episode_meta-house_XXXXXX.json
+  images/                                 # RGB frames
+    img_<t>.png
+  annotations/                            # structured CSV + JSON for post-processing
+    navigation-house_XXXXXX.csv
+    objects-house_XXXXXX.csv
+    doors-house_XXXXXX.csv
+    object_state-house_XXXXXX.csv
+    displacement_events-house_XXXXXX.csv
+    displacement_debug-house_XXXXXX.csv
+    passage_state-house_XXXXXX.csv
+    region_trajectory-house_XXXXXX.csv
+    world_layout-house_XXXXXX.json
+    episode_meta-house_XXXXXX.json
 ```
 
-**Do not** repeat `episode_id` / `scene_id` / `episode_kind` on every CSV row. Those live in `episode_meta-*.json` and the folder name. Consumers should join on folder + `timestep` / `obj-id`.
+**Do not** repeat `episode_id` / `scene_id` / `episode_kind` on every CSV row. Those live in `annotations/episode_meta-*.json` and the folder name. Consumers should join on folder + `timestep` / `obj-id`. Navigation `path` columns still point at files under `images/`.
+
+`episode_meta-*.json` also stores run geometry and agent constants needed for offline recomputation:
+
+| Section | Fields |
+|---------|--------|
+| `camera` | `width`, `height`, `frame_size_px`, `fov_vertical_deg` (nav / INTEL) |
+| `agent` | `movement_constant`, `rotation_deg`, `horizon_deg`, `arm_move_constant`, `wrist_rotation_deg` |
+| `visibility_filters` | mode, export policy, suggested post-process thresholds |
+
+### Which objects go where
+
+| Output | Objects included |
+|--------|------------------|
+| `navigation-*.csv` | **Named non-structural** objects with any nav `instance_detections2D` pixels this step, **plus visibility metrics**. Drops Wall/Floor and numeric-only ids (e.g. `2|4`). Post-processing decides keep/drop. |
+| `objects-*.csv` | Catalog of those FOV objects seen at least once (with instance color) |
+| `object_state-*.csv` / displacement | **Pickupable only**, and only after a **recognizable** first sighting (`passes_visibility_filters`) |
+| `current-room` / `region_trajectory` | **Agent–room** membership (do **not** treat Floor/Wall as the room object) |
+
+**Export vs filter (recommended policy):**
+
+| Stage | What is dropped at collection time | Who decides the rest |
+|-------|------------------------------------|----------------------|
+| Navigation / objects CSV | Structural (Wall/Floor/…) + numeric-only ids (`2|4`) | Post-processing via metrics |
+| Displacement “seen” | Tiny / thin / low shown-% peeks | Collector (`filter_recognizable_detections`) |
+
+**Why export-all-with-metrics for nav:** thresholds can be retuned without re-running THOR; different tasks can use different cutoffs.
+
+**Visibility metrics on each navigation object row** (formulas and caveats:
+**[VISIBILITY_METRICS.md](VISIBILITY_METRICS.md)**):
+
+| Column | Meaning |
+|--------|---------|
+| `visible-area-px` | Visible bbox area (or mask pixels in strict mode) |
+| `visible-frac` | `visible-area-px / frame_size` |
+| `full-silhouette-px` | Estimated full object screen area (size÷distance) |
+| `unoccluded-ratio` | `visible / full-silhouette` (shown % of the object) |
+
+Suggested post-process cutoffs are stored per run in
+`episode_meta.visibility_filters.suggested_postprocess_thresholds`
+(see [VISIBILITY_METRICS.md](VISIBILITY_METRICS.md) for current code defaults).
+
+Example post-process keep rule: apply your own cutoffs on
+`visible-area-px` / `unoccluded-ratio` (or use the suggested thresholds from episode_meta).
+
+Fully hidden / behind other geometry never appear in detections. Out-of-camera objects are
+not in `navigation` for that step. Hidden pickupables still appear in `object_state` after
+they were tracked.
+
+**Spatial relations (post-processing):**
+- Agent ↔ object: use `navigation` rows + agent pose vs object pose / bbox.
+- Agent ↔ room: use `current-room` / `region_trajectory` (and `world_layout`), not structural mesh rows.
 
 ### Important columns
 
@@ -81,7 +136,9 @@ Path: `$OBJAVERSE_NAVIGATION_PATH/<timestamp>/`
   - `same_receptacle_hidden_shift` — same surface, different pose (e.g. counter left→right)
   - `other_receptacle_hidden_place` — different receptacle in the same room
 
-**`navigation-*.csv`:** agent poses, rooms, visible **pickupable** dets + bbox, `action_success`, `held_obj-id`.
+**`navigation-*.csv`:** agent poses, rooms, **named non-structural** FOV objects + bbox,
+`visible-area-px`, `visible-frac`, `full-silhouette-px`, `unoccluded-ratio`,
+`action_success`, `held_obj-id`.
 
 **`world_layout-*.json` / `passage_state` / `region_trajectory`:** survey-oriented layout & room path.
 
@@ -121,13 +178,22 @@ Earlier freezes came from:
 2. Full-scene `ResetObjectFilter` every step.
 3. Too many `PlaceObjectAtPoint` attempts.
 4. Door metadata every step + noisy `[displace]` prints.
+5. Holding the full episode in RAM and building one giant pandas table only on `done`
+   (episodes that hit the 1000-step horizon never called `save_data`, so only images existed).
 
 Mitigations already in code:
 
-- Cache pickupable id set once; only fetch FOV ∩ pickupables for nav logging.
+- Cache pickupable id set once for displacement; nav/objects logging uses one metadata reset for all FOV ids.
 - Cache receptacles per room.
 - Limit place tries; quiet debug (CSV always; print mainly on success).
 - Sample doors every `door_log_interval` steps.
+- **`max_steps` hard cap** (same idea as an LLM context window): log at most the first
+  `max_steps` frames; further frames are ignored (`Collector.at_capacity`).
+  Non-positive `max_steps` (e.g. online eval’s temporary `-1`) means unset, not “already full”.
+- **Flush on horizon**: `save_data(reason="done"|"max_steps")` so CSVs exist even when
+  the agent never takes `done`.
+- **Incremental CSV flush** every `flush_every` (default 50) steps for navigation /
+  doors / object_state / region_trajectory / displacement_debug so RAM stays bounded.
 
 ---
 
@@ -143,6 +209,11 @@ Mitigations already in code:
 ---
 
 ## 7. How to run / review
+
+```bash
+# Unit tests for visibility filters
+python -m pytest tests/test_visibility_filters.py -v
+```
 
 ```bash
 . configure_variables.sh
@@ -162,11 +233,11 @@ python -m training.offline.online_eval --shuffle --eval_subset minival \
 export RUN="$OBJAVERSE_NAVIGATION_PATH/<timestamp>"
 export SCENE=house_XXXXXX   # from filenames
 
-cat "$RUN/episode_meta-${SCENE}.json"
-# Inspect displacement_events / object_state tracks
+cat "$RUN/annotations/episode_meta-${SCENE}.json"
+# Inspect annotations/displacement_events / object_state tracks
 ```
 
-Legacy spatial QA (`spatial_data_generation.py`, `qa_generator.py`) still consumes nav/objects CSVs. **Invisible-displacement items** should be built from `displacement_events` + `object_state`, not only the older spatial JSON.
+Legacy spatial QA (`spatial_data_generation.py`, `qa_generator.py`) still consumes nav/objects CSVs (now under `annotations/`). **Invisible-displacement items** should be built from `displacement_events` + `object_state`, not only the older spatial JSON.
 
 ---
 

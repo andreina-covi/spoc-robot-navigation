@@ -7,6 +7,8 @@ It introduces new modules for spatial-semantic grounding, map-based navigation, 
 
 → **[docs/DATA_COLLECTION.md](docs/DATA_COLLECTION.md)** — design of `Collector`, RoomVisit invisible displacement, output schemas, realism rules, performance notes, QA usage, and known fixes.
 
+→ **[docs/VISIBILITY_METRICS.md](docs/VISIBILITY_METRICS.md)** — how `visible-area-px`, `visible-frac`, `full-silhouette-px`, and `unoccluded-ratio` are calculated.
+
 ---
 
 ## 1. Environment setup
@@ -29,7 +31,7 @@ This sets (edit paths in `configure_variables.sh` if needed):
 
 1. Pickupable objects seen in the **nav camera** are tracked.
 2. After they leave the nav FOV for ≥2 steps, they may be relocated **in the same room** via `PlaceObjectAtPoint`, **only if the new pose stays out of the nav camera** (no pop-in).
-3. On episode end (`done`), logs are saved under `$OBJAVERSE_NAVIGATION_PATH/<timestamp>/`.
+3. On episode end (`done` or `max_steps`), logs are saved under `$OBJAVERSE_NAVIGATION_PATH/<timestamp>/` with `images/` and `annotations/`.
 
 Run a short eval (1 episode):
 
@@ -53,20 +55,23 @@ Increase `--eval_set_size` for more episodes. Details, schemas, and QA recipes: 
 
 ```text
 $OBJAVERSE_NAVIGATION_PATH/<MM_DD_YYYY_HH_MM_SS_ffffff>/
-  images/
-  navigation-house_XXXXXX.csv
-  objects-house_XXXXXX.csv
-  doors-house_XXXXXX.csv
-  object_state-house_XXXXXX.csv
-  displacement_events-house_XXXXXX.csv
-  displacement_debug-house_XXXXXX.csv
-  passage_state-house_XXXXXX.csv
-  region_trajectory-house_XXXXXX.csv
-  world_layout-house_XXXXXX.json
-  episode_meta-house_XXXXXX.json          # episode_id, episode_kind, counts
+  images/                                 # RGB frames (img_<t>.png)
+  annotations/                            # all CSV + JSON for the episode
+    navigation-house_XXXXXX.csv
+    objects-house_XXXXXX.csv
+    doors-house_XXXXXX.csv
+    object_state-house_XXXXXX.csv
+    displacement_events-house_XXXXXX.csv
+    displacement_debug-house_XXXXXX.csv
+    passage_state-house_XXXXXX.csv
+    region_trajectory-house_XXXXXX.csv
+    world_layout-house_XXXXXX.json
+    episode_meta-house_XXXXXX.json        # episode_id, episode_kind, counts
 ```
 
-Scene tag is `house_<index>` (not `Procedural`). Episode identity is the **folder** + `episode_meta` (not repeated on every CSV row).
+Scene tag is `house_<index>` (not `Procedural`). Episode identity is the **folder** + `annotations/episode_meta` (not repeated on every CSV row).
+
+Visibility columns on each navigation object row (`visible-area-px`, `visible-frac`, `full-silhouette-px`, `unoccluded-ratio`): see **[docs/VISIBILITY_METRICS.md](docs/VISIBILITY_METRICS.md)**.
 
 ---
 
@@ -76,10 +81,10 @@ Scene tag is `house_<index>` (not `Procedural`). Episode identity is the **folde
 ls -lt "$OBJAVERSE_NAVIGATION_PATH" | head
 export RUN="$OBJAVERSE_NAVIGATION_PATH/<timestamp>"
 export SCENE=house_XXXXXX
-cat "$RUN/episode_meta-${SCENE}.json"
+cat "$RUN/annotations/episode_meta-${SCENE}.json"
 ```
 
-Check `num_displacements`, then `displacement_events-*.csv` and the corresponding `object_state` track (`in_camera_fov` true → false → move while false).  
+Check `num_displacements`, then `annotations/displacement_events-*.csv` and the corresponding `object_state` track (`in_camera_fov` true → false → move while false).  
 Full review snippets and question examples: [docs/DATA_COLLECTION.md](docs/DATA_COLLECTION.md) §§7–8.
 
 ---
@@ -88,13 +93,13 @@ Full review snippets and question examples: [docs/DATA_COLLECTION.md](docs/DATA_
 
 ```bash
 python -m spatial_data_generation \
-  --csv_path_navigation "$RUN/navigation-${SCENE}.csv" \
-  --csv_path_objects "$RUN/objects-${SCENE}.csv" \
-  --json_path_dict "$RUN/jsons" \
+  --csv_path_navigation "$RUN/annotations/navigation-${SCENE}.csv" \
+  --csv_path_objects "$RUN/annotations/objects-${SCENE}.csv" \
+  --json_path_dict "$RUN/annotations/jsons" \
   --json_filename structured_data_angle.json
 ```
 
-Example (legacy `Procedural` name; new runs use `house_XXXXXX`):
+Example (legacy flat layout / `Procedural` name; new runs use `annotations/` + `house_XXXXXX`):
 
 ```bash
 python -m spatial_data_generation \
@@ -108,14 +113,6 @@ python -m spatial_data_generation \
 
 ## 5. Generate QA (legacy spatial templates)
 
-```bash
-python qa_generator.py \
-  /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_06_2026_17_02_54_768901/jsons/structured_data_angle.json \
-  /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_06_2026_17_02_54_768901/benchmark \
-  traj_001 4 \
-  /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_06_2026_17_02_54_768901/objects-Procedural.csv
-```
-
 For **invisible displacement / survey** items, use `object_state`, `displacement_events`, and `world_layout` (see [docs/DATA_COLLECTION.md](docs/DATA_COLLECTION.md)).
 
 ---
@@ -125,6 +122,7 @@ For **invisible displacement / survey** items, use `object_state`, `displacement
 | File | Role |
 |------|------|
 | `docs/DATA_COLLECTION.md` | Full design context for agents |
+| `docs/VISIBILITY_METRICS.md` | Formulas for nav visibility CSV columns |
 | `tasks/room_visit_task.py` | RoomVisit step loop, hidden relocation, layout |
 | `collector.py` | CSV/JSON logging, visibility tracking |
 | `environment/spoc_objects.py` | `SPOCObject.get()` fix |

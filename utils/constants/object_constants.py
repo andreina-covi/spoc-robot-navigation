@@ -396,6 +396,47 @@ AI2THOR_OBJECT_TYPE_TO_MOST_SPECIFIC_WORDNET_LEMMA = {
 _cached_bad_asset_ids = None
 
 
+# Scene geometry — not useful as entities for agent–object spatial relations.
+# Agent–room membership comes from current-room / region_trajectory, not Floor/Wall rows.
+STRUCTURAL_OBJECT_TYPES = frozenset(
+    {
+        "Wall",
+        "Floor",
+        "Ceiling",
+        "Room",  # mostly architectural; doors stay (openable passages)
+    }
+)
+
+_STRUCTURAL_OID_PREFIXES = ("Wall|", "Floor|", "Ceiling|", "Doorway|", "Doorframe|", "Room|")
+
+
+def is_structural_object(obj_type=None, object_id=None) -> bool:
+    """True for walls/floors/ceilings/etc. that should not enter objects / nav FOV lists."""
+    if obj_type is not None and obj_type in STRUCTURAL_OBJECT_TYPES:
+        return True
+    if object_id is not None and str(object_id).startswith(_STRUCTURAL_OID_PREFIXES):
+        return True
+    return False
+
+
+def has_named_object_id(object_id) -> bool:
+    """True if objectId starts with a type name (e.g. ``Cup|2|10``), not only digits (``2|4``).
+
+    Some THOR assets use numeric-only ids that are not useful for spatial-relation labels.
+    """
+    if object_id is None:
+        return False
+    oid = str(object_id).strip()
+    return bool(oid) and oid[0].isalpha()
+
+
+def is_exportable_object(obj_type=None, object_id=None) -> bool:
+    """Objects worth writing to navigation/objects CSV: named, non-structural."""
+    if not has_named_object_id(object_id):
+        return False
+    return not is_structural_object(obj_type=obj_type, object_id=object_id)
+
+
 def bad_asset_ids():
     global _cached_bad_asset_ids
     if _cached_bad_asset_ids is None:
