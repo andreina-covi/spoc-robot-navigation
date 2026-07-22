@@ -272,9 +272,9 @@ class RoomVisitTask(AbstractSPOCTask):
         Excludes walls/floors/ceilings/rooms and numeric-only ids (e.g. ``2|4``).
         Agent–room relations use current-room / region_trajectory instead.
         """
-        if detections is None:
-            return []
         result = []
+        if detections is None:
+            return result
         fov_ids = list(detections.keys())
         if not fov_ids:
             return result
@@ -781,22 +781,22 @@ class RoomVisitTask(AbstractSPOCTask):
                     print("instance segmentation is none")
                 else:
                     raw_detections = (
-                        self.controller.controller.last_event.instance_detections2D or {}
+                        detections or {}
                     )
                     # Export: named non-structural FOV objects (+ visibility metrics in CSV)
                     export_dets = self.collector.filter_export_detections(raw_detections)
                     objects = self._gather_fov_all_objects(export_dets)
-                    objects_by_id = {o["objectId"]: o for o in objects}
+                    # objects_by_id = {o["objectId"]: o for o in objects}
 
-                    # Displacement "seen": only recognizable (shown % / size thresholds)
-                    recognizable = self.collector.filter_recognizable_detections(
-                        export_dets,
-                        self.controller.controller,
-                        objects_by_id=objects_by_id,
-                    )
+                    # # Displacement "seen": only recognizable (shown % / size thresholds)
+                    # recognizable = self.collector.filter_recognizable_detections(
+                    #     export_dets,
+                    #     self.controller.controller,
+                    #     objects_by_id=objects_by_id,
+                    # )
 
                     # 1) Discover pickupables only when recognizable; "hidden" uses raw FOV
-                    pickupable_meta = self._gather_fov_pickupable_meta(recognizable)
+                    pickupable_meta = self._gather_fov_pickupable_meta(export_dets)
                     self.collector.update_visibility_tracking(raw_detections, pickupable_meta)
 
                     # 2) Relocate when out of ALL nav pixels

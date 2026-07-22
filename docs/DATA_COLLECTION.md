@@ -77,23 +77,22 @@ Each episode root has **two** sibling folders:
 |---------|--------|
 | `camera` | `width`, `height`, `frame_size_px`, `fov_vertical_deg` (nav / INTEL) |
 | `agent` | `movement_constant`, `rotation_deg`, `horizon_deg`, `arm_move_constant`, `wrist_rotation_deg` |
-| `visibility_filters` | mode, export policy, suggested post-process thresholds |
+| `visibility_filters` | export policy note (no hard thresholds at collection) |
 
 ### Which objects go where
 
 | Output | Objects included |
 |--------|------------------|
-| `navigation-*.csv` | **Named non-structural** objects with any nav `instance_detections2D` pixels this step, **plus visibility metrics**. Drops Wall/Floor and numeric-only ids (e.g. `2|4`). Post-processing decides keep/drop. |
+| `navigation-*.csv` | **Named non-structural** FOV objects with `visible-pixels > 0`, **plus visibility metrics**. Drops Wall/Floor and numeric-only ids (e.g. `2|4`). Post-processing decides keep/drop. |
 | `objects-*.csv` | Catalog of those FOV objects seen at least once (with instance color) |
-| `object_state-*.csv` / displacement | **Pickupable only**, and only after a **recognizable** first sighting (`passes_visibility_filters`) |
+| `object_state-*.csv` / displacement | **Pickupable** objects tracked after appearing in nav FOV |
 | `current-room` / `region_trajectory` | **Agent–room** membership (do **not** treat Floor/Wall as the room object) |
 
 **Export vs filter (recommended policy):**
 
 | Stage | What is dropped at collection time | Who decides the rest |
 |-------|------------------------------------|----------------------|
-| Navigation / objects CSV | Structural (Wall/Floor/…) + numeric-only ids (`2|4`) | Post-processing via metrics |
-| Displacement “seen” | Tiny / thin / low shown-% peeks | Collector (`filter_recognizable_detections`) |
+| Navigation / objects CSV | Structural (Wall/Floor/…) + numeric-only ids (`2|4`) + zero mask pixels | Post-processing via metrics |
 
 **Why export-all-with-metrics for nav:** thresholds can be retuned without re-running THOR; different tasks can use different cutoffs.
 
@@ -102,17 +101,13 @@ Each episode root has **two** sibling folders:
 
 | Column | Meaning |
 |--------|---------|
-| `visible-area-px` | Visible bbox area (or mask pixels in strict mode) |
-| `visible-frac` | `visible-area-px / frame_size` |
-| `full-silhouette-px` | Estimated full object screen area (size÷distance) |
-| `unoccluded-ratio` | `visible / full-silhouette` (shown % of the object) |
-
-Suggested post-process cutoffs are stored per run in
-`episode_meta.visibility_filters.suggested_postprocess_thresholds`
-(see [VISIBILITY_METRICS.md](VISIBILITY_METRICS.md) for current code defaults).
+| `visible-pixels` | Mask pixels of the object inside its bbox |
+| `bbox-area` | Detection box area `(cmax-cmin)*(rmax-rmin)` |
+| `min-side` | `min(width, height)` of the bbox |
+| `occupancy-ratio` | `visible-pixels / bbox-area` |
 
 Example post-process keep rule: apply your own cutoffs on
-`visible-area-px` / `unoccluded-ratio` (or use the suggested thresholds from episode_meta).
+`visible-pixels` / `min-side` / `occupancy-ratio`.
 
 Fully hidden / behind other geometry never appear in detections. Out-of-camera objects are
 not in `navigation` for that step. Hidden pickupables still appear in `object_state` after
@@ -137,7 +132,7 @@ they were tracked.
   - `other_receptacle_hidden_place` — different receptacle in the same room
 
 **`navigation-*.csv`:** agent poses, rooms, **named non-structural** FOV objects + bbox,
-`visible-area-px`, `visible-frac`, `full-silhouette-px`, `unoccluded-ratio`,
+`visible-pixels`, `bbox-area`, `min-side`, `occupancy-ratio`,
 `action_success`, `held_obj-id`.
 
 **`world_layout-*.json` / `passage_state` / `region_trajectory`:** survey-oriented layout & room path.
@@ -211,8 +206,9 @@ Mitigations already in code:
 ## 7. How to run / review
 
 ```bash
-# Unit tests for visibility filters
-python -m pytest tests/test_visibility_filters.py -v
+# Note: tests/test_visibility_filters.py still targets the old silhouette /
+# unoccluded-ratio API and needs a rewrite for visible-pixels / min-side /
+# occupancy-ratio before it will pass against current collector.py.
 ```
 
 ```bash

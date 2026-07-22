@@ -33,20 +33,10 @@ class Collector:
     - ``annotations/`` — all CSV and JSON exports
     """
 
-    # Default visibility thresholds (396×224 nav frame).
-    # Tuned so a human can typically recognize the object, not a 1–2 px peek.
-    DEFAULT_MIN_FRAME_FRACTION = 0.009  # ~0.90% of the frame
     FRAME_WIDTH = INTEL_CAMERA_WIDTH
     FRAME_HEIGHT = INTEL_CAMERA_HEIGHT
     FRAME_SIZE_PX = FRAME_WIDTH * FRAME_HEIGHT
     VERTICAL_FOV_DEG = INTEL_VERTICAL_FOV
-    # Minimum visible area derived from frame coverage (used as bbox-area threshold in fast mode)
-    MIN_MASK_PIXELS = FRAME_SIZE_PX * DEFAULT_MIN_FRAME_FRACTION
-    DEFAULT_MIN_BBOX_SIDE = 12  # drops thin edge slivers
-    # Strict mode only: visible_mask / projected_silhouette
-    DEFAULT_MIN_UNOCCLUDED_RATIO = 0.4
-    # "fast" = bbox-only (default, collection-safe); "strict" = masks + 3D silhouette (slow)
-    DEFAULT_VISIBILITY_MODE = "fast"
 
     # Step-growing CSVs flushed incrementally; small / end-of-episode files written in save_data.
     _STREAM_TABLES = (
@@ -66,11 +56,6 @@ class Collector:
         max_displacements=5,
         max_steps=None,
         flush_every=50,
-        min_frame_fraction=None,
-        min_unoccluded_ratio=None,
-        min_mask_pixels=None,
-        min_bbox_side=None,
-        visibility_mode=None,
     ):
         self.dict_agent = {}
         self.data_objects = {"objects": set()}
@@ -101,33 +86,6 @@ class Collector:
         self._truncated = False
         self._save_reason = None
 
-        self.visibility_mode = (
-            self.DEFAULT_VISIBILITY_MODE
-            if visibility_mode is None
-            else str(visibility_mode).lower()
-        )
-        self.min_frame_fraction = (
-            self.DEFAULT_MIN_FRAME_FRACTION
-            if min_frame_fraction is None
-            else float(min_frame_fraction)
-        )
-        # If the caller overrides frame fraction, recompute MIN_MASK_PIXELS-equivalent
-        self.min_mask_pixels = (
-            self.FRAME_SIZE_PX * self.min_frame_fraction
-            if min_mask_pixels is None
-            else float(min_mask_pixels)
-        )
-        self.min_bbox_side = (
-            self.DEFAULT_MIN_BBOX_SIDE if min_bbox_side is None else float(min_bbox_side)
-        )
-        self.min_unoccluded_ratio = (
-            self.DEFAULT_MIN_UNOCCLUDED_RATIO
-            if min_unoccluded_ratio is None
-            else float(min_unoccluded_ratio)
-        )
-
-        # Track objects seen in nav FOV for invisible displacement
-        # oid -> {obj_type, first_seen_t, last_in_fov_t, hidden_steps, displaced}
         self.tracked_objects = {}
         self.displaced_object_ids = set()
         self.world_layout = None
@@ -155,118 +113,6 @@ class Collector:
             rounded_arr = arr_numbers
         return tuple([np.round(number, n_round) for number in rounded_arr])
 
-    @staticmethod
-    def bbox_width_height_area(bbox):
-        """Return (width, height, area) for an instance_detections2D bbox [cmin,rmin,cmax,rmax]."""
-        if bbox is None or len(bbox) < 4:
-            return 0.0, 0.0, 0.0
-        width = max(0.0, float(bbox[2]) - float(bbox[0]))
-        height = max(0.0, float(bbox[3]) - float(bbox[1]))
-        return width, height, width * height
-
-    @staticmethod
-    def get_mask_pixel_count(object_id, instance_masks):
-        """Count visible pixels for ``object_id`` from THOR ``instance_masks``."""
-        if not instance_masks or object_id not in instance_masks:
-            return None
-        mask = instance_masks[object_id]
-        if mask is None:
-            return None
-        return int(np.count_nonzero(mask))
-
-    def estimate_full_silhouette_from_size_distance(self, obj_meta, frame_hw=None):
-        """Estimate full on-screen object area from 3D size and distance.
-
-        Uses the two largest AABB/OBB extents:
-        ``(f * a / dist) * (f * b / dist)``. This is the denominator for
-        ``visible_area / full_object_area`` (shown fraction of the object).
-        """
-        if not obj_meta:
-            return None
-        dist = obj_meta.get("distance")
-        if dist is None:
-            return None
-        dist = float(dist)
-        if dist < 0.05:
-            return None
-
-        size = None
-        for key in ("objectOrientedBoundingBox", "axisAlignedBoundingBox"):
-            box = obj_meta.get(key)
-            if box and box.get("size") is not None:
-                size = box["size"]
-                break
-        if size is None:
-            return None
-
-        try:
-            extents = sorted(
-                [float(size["x"]), float(size["y"]), float(size["z"])], reverse=True
-            )
-        except Exception:
-            return None
-        a, b = extents[0], extents[1]
-        if a <= 0 or b <= 0:
-            return None
-
-        if frame_hw is None:
-            height = INTEL_CAMERA_HEIGHT
-        else:
-            height = int(frame_hw[0])
-        fy = (height / 2.0) / np.tan(np.deg2rad(self.VERTICAL_FOV_DEG) / 2.0)
-        area = float((fy * a / dist) * (fy * b / dist))
-        return area if area > 1.0 else None
-
-    def compute_visibility_metrics(
-        self, bbox, mask_pixels=None, frame_hw=None, silhouette_pixels=None
-    ):
-        """How much of the object is visible in the nav frame (metrics only, no keep/drop)."""
-        width, height, bbox_area = self.bbox_width_height_area(bbox)
-        used_mask = mask_pixels is not None
-        visible_area = float(mask_pixels) if used_mask else float(bbox_area)
-
-        frame_px = float(self.FRAME_SIZE_PX)
-        if frame_hw is not None:
-            fh, fw = int(frame_hw[0]), int(frame_hw[1])
-            frame_px = float(max(1, fh * fw))
-        visible_frac = visible_area / frame_px
-
-        unoccluded_ratio = None
-        if silhouette_pixels is not None and silhouette_pixels > 0:
-            unoccluded_ratio = min(1.0, visible_area / float(silhouette_pixels))
-
-        return {
-            "bbox_width": width,
-            "bbox_height": height,
-            "bbox_area": bbox_area,
-            "visible_area_px": visible_area,
-            "visible_frac": visible_frac,
-            "silhouette_pixels": silhouette_pixels,
-            "unoccluded_ratio": unoccluded_ratio,
-            "used_mask": used_mask,
-        }
-
-    def passes_visibility_filters(self, metrics) -> bool:
-        """Recognizability gate for invisible-displacement discovery (not written to CSV).
-
-        Requires sufficient bbox area, min side length, frame fraction, and (when known)
-        shown fraction of the object. Strict mode also checks mask pixel count.
-        """
-        if metrics["bbox_area"] < self.min_mask_pixels:
-            return False
-        if min(metrics["bbox_width"], metrics["bbox_height"]) < self.min_bbox_side:
-            return False
-        if metrics["visible_frac"] is not None and metrics["visible_frac"] < self.min_frame_fraction:
-            return False
-        if (
-            metrics["unoccluded_ratio"] is not None
-            and metrics["unoccluded_ratio"] < self.min_unoccluded_ratio
-        ):
-            return False
-        if self.visibility_mode == "strict" and metrics["visible_area_px"] < self.min_mask_pixels:
-            return False
-        return True
-
     def filter_export_detections(self, detections):
         """Detections for CSV export: named, non-structural objects (any nav pixels).
 
@@ -281,90 +127,28 @@ class Collector:
             if is_exportable_object(object_id=oid)
         }
 
-    def filter_recognizable_detections(self, detections, controller, objects_by_id=None):
-        """Keep detections that pass recognizability thresholds (displacement / "seen").
+    def get_visible_pixels_from_bbox(self, event, bbox, color):
+        """Get visible pixels from bbox and color."""
+        cmin, rmin, cmax, rmax = bbox
+        crop = event.instance_segmentation_frame[rmin:rmax, cmin:cmax]
+        visible_pixels = int(np.all(crop == color, axis=2).sum())
+        return visible_pixels
 
-        Not used for navigation export. Cheap bbox checks first, then size/distance
-        shown-fraction when object metadata is available.
-        """
-        if not detections:
-            return {}
-        event = controller.last_event
-        frame = getattr(event, "frame", None)
-        frame_hw = None if frame is None else frame.shape[:2]
-
-        candidates = {}
-        for oid, bbox in detections.items():
-            if not is_exportable_object(object_id=oid):
-                continue
-            width, height, area = self.bbox_width_height_area(bbox)
-            if area < self.min_mask_pixels or min(width, height) < self.min_bbox_side:
-                continue
-            candidates[oid] = bbox
-        if not candidates:
-            return {}
-
-        if objects_by_id is None:
-            objects_by_id = {}
-            try:
-                for o in event.metadata.get("objects", []):
-                    oid = o.get("objectId")
-                    if oid in candidates:
-                        objects_by_id[oid] = o
-            except Exception:
-                objects_by_id = {}
-
-        use_strict = self.visibility_mode == "strict"
-        instance_masks = (getattr(event, "instance_masks", None) or {}) if use_strict else {}
-
-        kept = {}
-        for oid, bbox in candidates.items():
-            obj_meta = objects_by_id.get(oid)
-            if obj_meta is not None and not is_exportable_object(
-                obj_type=obj_meta.get("objectType"), object_id=oid
-            ):
-                continue
-
-            mask_px = (
-                self.get_mask_pixel_count(oid, instance_masks) if use_strict else None
-            )
-            silhouette = None
-            if obj_meta is not None:
-                silhouette = self.estimate_full_silhouette_from_size_distance(
-                    obj_meta, frame_hw=frame_hw
-                )
-
-            metrics = self.compute_visibility_metrics(
-                bbox,
-                mask_pixels=mask_px,
-                frame_hw=frame_hw,
-                silhouette_pixels=silhouette,
-            )
-            if self.passes_visibility_filters(metrics):
-                kept[oid] = bbox
-        return kept
-
-    def get_object_data(self, arr_objects, controller, min_distance=0.0, max_distance=None):
+    def get_object_data(self, arr_objects, controller):
         """Collect named non-structural FOV objects with visibility metrics.
 
-        Does not drop for failing recognizability thresholds. Each nav row includes
-        ``visible-area-px``, ``visible-frac``, ``unoccluded-ratio``, and
-        ``full-silhouette-px`` so post-processing can decide. Skips structural meshes
-        and numeric-only ids (e.g. ``2|4``).
+        Does not apply size/occupancy thresholds. Each nav row includes
+        ``visible-pixels``, ``bbox-area``, ``min-side``, and ``occupancy-ratio``
+        so post-processing can decide. Skips structural meshes and numeric-only
+        ids (e.g. ``2|4``), and objects with zero mask pixels.
         """
         objects = set()
         cond_objs = []
-        detections = controller.last_event.instance_detections2D
+        event = controller.last_event
+        detections = event.instance_detections2D
         if detections is None:
             return cond_objs, objects
 
-        event = controller.last_event
-        frame = getattr(event, "frame", None)
-        frame_hw = None if frame is None else frame.shape[:2]
-        use_strict = self.visibility_mode == "strict"
-        instance_masks = (
-            (getattr(event, "instance_masks", None) or {}) if use_strict else {}
-        )
         pos_dict_default = {"x": 0.0, "y": 0.0, "z": 0.0}
 
         for obj_dict in arr_objects:
@@ -376,42 +160,28 @@ class Collector:
                 continue
 
             bbox = detections[oid]
-            _, _, area = self.bbox_width_height_area(bbox)
-            if area <= 0:
+            color = self.dict_colors.get(oid)
+            if color is None:
                 continue
-
-            mask_px = self.get_mask_pixel_count(oid, instance_masks) if use_strict else None
-            silhouette = self.estimate_full_silhouette_from_size_distance(
-                obj_dict, frame_hw=frame_hw
-            )
-            metrics = self.compute_visibility_metrics(
-                bbox,
-                mask_pixels=mask_px,
-                frame_hw=frame_hw,
-                silhouette_pixels=silhouette,
-            )
+            # color = np.asarray(event.objects_by_id[oid].color, dtype=np.uint8)
+            visible_pixels = self.get_visible_pixels_from_bbox(event, bbox, color)
+            if visible_pixels == 0:
+                continue
+            cmin, rmin, cmax, rmax = bbox
+            bbox_area = (cmax - cmin) * (rmax - rmin)
+            min_side = min(cmax - cmin, rmax - rmin)
+            occupancy = np.round(visible_pixels / bbox_area, 3)
 
             dist = float(obj_dict.get("distance") or 0.0)
-            if dist < min_distance:
-                continue
-            if max_distance is not None and dist > max_distance:
-                continue
-
-            # [oid, dist, bbox, visible_area_px, visible_frac, unoccluded_ratio,
-            #  full_silhouette_px]
             cond_objs.append(
                 [
                     oid,
                     np.round(dist, 4),
                     bbox,
-                    int(round(metrics["visible_area_px"])),
-                    float(np.round(metrics["visible_frac"], 6)),
-                    None
-                    if metrics["unoccluded_ratio"] is None
-                    else float(np.round(metrics["unoccluded_ratio"], 4)),
-                    None
-                    if metrics["silhouette_pixels"] is None
-                    else float(np.round(metrics["silhouette_pixels"], 2)),
+                    visible_pixels,
+                    bbox_area,
+                    min_side,
+                    occupancy,
                 ]
             )
 
@@ -421,9 +191,6 @@ class Collector:
             if box is None:
                 box = {}
 
-            color = self.dict_colors.get(oid)
-            if color is None:
-                continue
             objects.add(
                 (
                     obj_type,
@@ -476,11 +243,10 @@ class Collector:
             dict_navigation["obj-id"].append(None)
             dict_navigation["obj-distance"].append(None)
             self.save_bbox(dict_navigation, [None, None, None, None])
-            dict_navigation["visible-area-px"].append(None)
-            dict_navigation["visible-frac"].append(None)
-            dict_navigation["unoccluded-ratio"].append(None)
-            dict_navigation["full-silhouette-px"].append(None)
-            return
+            dict_navigation["visible-pixels"].append(None)
+            dict_navigation["bbox-area"].append(None)
+            dict_navigation["min-side"].append(None)
+            dict_navigation["occupancy-ratio"].append(None)
 
         for object_data in objects_data:
             self.add_basic_navigation_data(dict_navigation, key)
@@ -488,18 +254,18 @@ class Collector:
             dict_navigation["obj-distance"].append(object_data[1])
             self.save_bbox(dict_navigation, object_data[2])
             if len(object_data) >= 7:
-                dict_navigation["visible-area-px"].append(object_data[3])
-                dict_navigation["visible-frac"].append(object_data[4])
-                dict_navigation["unoccluded-ratio"].append(object_data[5])
-                dict_navigation["full-silhouette-px"].append(object_data[6])
+                dict_navigation["visible-pixels"].append(object_data[3])
+                dict_navigation["bbox-area"].append(object_data[4])
+                dict_navigation["min-side"].append(object_data[5])
+                dict_navigation["occupancy-ratio"].append(object_data[6])
             else:
-                dict_navigation["visible-area-px"].append(None)
-                dict_navigation["visible-frac"].append(None)
-                dict_navigation["unoccluded-ratio"].append(None)
-                dict_navigation["full-silhouette-px"].append(None)
+                dict_navigation["visible-pixels"].append(None)
+                dict_navigation["bbox-area"].append(None)
+                dict_navigation["min-side"].append(None)
+                dict_navigation["occupancy-ratio"].append(None)
 
-    def save_image(self, image_name, event):
-        cv2.imwrite(image_name, event.cv2img)
+    def save_image(self, im_path, event):
+        cv2.imwrite(im_path, event.cv2img)
 
     def get_dict_navigation(self):
         # episode/scene ids live in episode_meta.json (folder already identifies the run)
@@ -530,10 +296,10 @@ class Collector:
             "seen-rooms": [],
             "obj-id": [],
             "obj-distance": [],
-            "visible-area-px": [],
-            "visible-frac": [],
-            "unoccluded-ratio": [],
-            "full-silhouette-px": [],
+            "visible-pixels": [],
+            "bbox-area": [],
+            "min-side": [],
+            "occupancy-ratio": [],
             "path": [],
         }
         for key in self.dict_agent:
@@ -967,9 +733,10 @@ class Collector:
                         receptacle_is_open=row.get("receptacle_is_open"),
                     )
 
-            image_name = os.path.join(self.image_path, "img_" + str(self.timestep) + ".png")
+            image_name = "img_" + str(self.timestep) + ".png"
+            im_path = os.path.join(self.image_path, image_name)
             self.dict_agent[key]["image"] = image_name
-            self.save_image(image_name, event)
+            self.save_image(im_path, event)
             self.timestep += 1
 
             if self.timestep % self.flush_every == 0:
@@ -1032,6 +799,9 @@ class Collector:
                 fail_counts = {}
 
         meta = {
+            "path_to_data": self.out_dir,
+            "path_to_images": self.image_path,
+            "path_to_annotations": self.annotations_dir,
             "episode_id": self.episode_id,
             "episode_kind": self.episode_kind,
             "environment": self.environment,
@@ -1043,8 +813,6 @@ class Collector:
             "num_displacements": len(self.data_displacement_events),
             "num_tracked_objects": len(self.tracked_objects),
             "displacement_fail_stages": fail_counts,
-            "images_dir": "images",
-            "annotations_dir": "annotations",
             "camera": {
                 "width": self.FRAME_WIDTH,
                 "height": self.FRAME_HEIGHT,
@@ -1060,21 +828,9 @@ class Collector:
                 "wrist_rotation_deg": WRIST_ROTATION,
             },
             "visibility_filters": {
-                "visibility_mode": self.visibility_mode,
-                "export_policy": "named_non_structural_with_metrics",
-                "suggested_postprocess_thresholds": {
-                    "min_frame_fraction": self.min_frame_fraction,
-                    "min_mask_pixels": self.min_mask_pixels,
-                    "min_bbox_side": self.min_bbox_side,
-                    "min_unoccluded_ratio": self.min_unoccluded_ratio,
-                },
                 "note": (
                     "navigation/objects CSV lists named non-structural FOV objects "
-                    "(drops Wall/Floor and numeric-only ids like '2|4'); "
-                    "filter with suggested thresholds in post-processing. "
-                    "Displacement discovery still uses filter_recognizable_detections. "
-                    "Use camera.width/height and camera.fov_vertical_deg when recomputing "
-                    "visible-frac or full-silhouette-px offline."
+                    "(drops Wall/Floor and numeric-only ids like '2|4')."
                 ),
             },
         }

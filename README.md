@@ -7,7 +7,7 @@ It introduces new modules for spatial-semantic grounding, map-based navigation, 
 
 → **[docs/DATA_COLLECTION.md](docs/DATA_COLLECTION.md)** — design of `Collector`, RoomVisit invisible displacement, output schemas, realism rules, performance notes, QA usage, and known fixes.
 
-→ **[docs/VISIBILITY_METRICS.md](docs/VISIBILITY_METRICS.md)** — how `visible-area-px`, `visible-frac`, `full-silhouette-px`, and `unoccluded-ratio` are calculated.
+→ **[docs/VISIBILITY_METRICS.md](docs/VISIBILITY_METRICS.md)** — how `visible-pixels`, `bbox-area`, `min-side`, and `occupancy-ratio` are calculated.
 
 ---
 
@@ -71,7 +71,7 @@ $OBJAVERSE_NAVIGATION_PATH/<MM_DD_YYYY_HH_MM_SS_ffffff>/
 
 Scene tag is `house_<index>` (not `Procedural`). Episode identity is the **folder** + `annotations/episode_meta` (not repeated on every CSV row).
 
-Visibility columns on each navigation object row (`visible-area-px`, `visible-frac`, `full-silhouette-px`, `unoccluded-ratio`): see **[docs/VISIBILITY_METRICS.md](docs/VISIBILITY_METRICS.md)**.
+Visibility columns on each navigation object row (`visible-pixels`, `bbox-area`, `min-side`, `occupancy-ratio`): see **[docs/VISIBILITY_METRICS.md](docs/VISIBILITY_METRICS.md)**.
 
 ---
 
