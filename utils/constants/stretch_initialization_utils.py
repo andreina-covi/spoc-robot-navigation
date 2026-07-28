@@ -76,7 +76,7 @@ MAXIMUM_DISTANCE_ARM_FROM_AGENT_CENTER = (
     0.8673349051766235  # Computed with fixed arm agent, should have pairity with real
 )
 
-MAXIMUM_DISTANCE_OBJECTS_FROM_AGENT_CENTER = 1.5
+MAXIMUM_DISTANCE_OBJECTS_FROM_AGENT_CENTER = 100 # 1.5
 
 SAVE_DEPTH = False
 
@@ -93,7 +93,7 @@ STRETCH_ENV_ARGS = dict(
     massThreshold=10,
     autoSimulation=False,
     autoSyncTransforms=True,
-    renderInstanceSegmentation=True,
+    renderInstanceSegmentation=True,  # required for instance_detections2D / masks when synthesis is on
     agentMode="stretch",
     renderDepthImage=SAVE_DEPTH,
     cameraNearPlane=0.01,  # VERY VERY IMPORTANT

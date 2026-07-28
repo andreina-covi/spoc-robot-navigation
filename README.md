@@ -29,8 +29,8 @@ This sets (edit paths in `configure_variables.sh` if needed):
 
 `RoomVisitTask` uses `Collector` during navigation. While the agent explores:
 
-1. Pickupable objects seen in the **nav camera** are tracked.
-2. After they leave the nav FOV for ≥2 steps, they may be relocated **in the same room** via `PlaceObjectAtPoint`, **only if the new pose stays out of the nav camera** (no pop-in).
+1. Pickupable objects with THOR `visible=True` are tracked (`visibilityDistance`-based).
+2. After they remain `visible=False` for ≥2 steps, they may be relocated **in the same room** via `PlaceObjectAtPoint`, **only if the new pose remains `visible=False`** (no pop-in).
 3. On episode end (`done` or `max_steps`), logs are saved under `$OBJAVERSE_NAVIGATION_PATH/<timestamp>/` with `images/` and `annotations/`.
 
 Run a short eval (1 episode):
@@ -84,7 +84,7 @@ export SCENE=house_XXXXXX
 cat "$RUN/annotations/episode_meta-${SCENE}.json"
 ```
 
-Check `num_displacements`, then `annotations/displacement_events-*.csv` and the corresponding `object_state` track (`in_camera_fov` true → false → move while false).  
+Check `num_displacements`, then `annotations/displacement_events-*.csv` and the corresponding `object_state` track (`in_camera_fov`/`visible` true → false → move while false).  
 Full review snippets and question examples: [docs/DATA_COLLECTION.md](docs/DATA_COLLECTION.md) §§7–8.
 
 ---

@@ -20,6 +20,15 @@ from utils.constants.stretch_initialization_utils import (
 from utils.constants.object_constants import is_exportable_object
 from utils.type_utils import THORActions
 
+from geometry import (
+    DEFAULT_NAV_CAMERA_MOUNT_DEG,
+    angular_size_deg,
+    box_center_size,
+    camera_intrinsics,
+    corners_from_box,
+    expected_bbox_from_3d,
+)
+
 
 class Collector:
     """Logs navigation + cm-benchmark fields for invisible_displacement / survey.
@@ -58,7 +67,7 @@ class Collector:
         flush_every=50,
     ):
         self.dict_agent = {}
-        self.data_objects = {"objects": set()}
+        self.data_objects = {}  # objectId -> catalog tuple for objects-*.csv
         self.data_doors = []
         self.data_object_state = []
         self.data_displacement_events = []
@@ -89,6 +98,11 @@ class Collector:
         self.tracked_objects = {}
         self.displaced_object_ids = set()
         self.world_layout = None
+        # How often RoomVisit enables renderImageSynthesis for FOV object logging
+        self.fov_stride = 1
+        # Synced from StretchController.calibrate_agent (RotateCameraMount / FOV)
+        self.nav_camera_mount_deg = DEFAULT_NAV_CAMERA_MOUNT_DEG
+        self.nav_camera_fov_deg = float(INTEL_VERTICAL_FOV)
 
         os.makedirs(self.image_path, exist_ok=True)
         os.makedirs(self.annotations_dir, exist_ok=True)
@@ -134,77 +148,180 @@ class Collector:
         visible_pixels = int(np.all(crop == color, axis=2).sum())
         return visible_pixels
 
-    def get_object_data(self, arr_objects, controller):
-        """Collect named non-structural FOV objects with visibility metrics.
+    def get_object_data(self, arr_objects, event, include_detections=False):
+        """Collect named non-structural objects for navigation / objects CSV.
 
-        Does not apply size/occupancy thresholds. Each nav row includes
-        ``visible-pixels``, ``bbox-area``, ``min-side``, and ``occupancy-ratio``
-        so post-processing can decide. Skips structural meshes and numeric-only
-        ids (e.g. ``2|4``), and objects with zero mask pixels.
+        Always emit ``obj-id`` and ``obj-distance`` from metadata (no detections needed).
+        Bbox / visible-pixels / occupancy are filled **only** when
+        ``include_detections=True`` and ``event`` is the navigation step that actually
+        ran ``renderImageSynthesis``.
+
+        Important: use the nav ``event`` snapshot — do **not** read
+        ``controller.last_event`` after later PlaceObjectAtPoint / Pass steps, which
+        run without synthesis and wipe or stale-out detections.
         """
-        objects = set()
+        objects = {}
         cond_objs = []
-        event = controller.last_event
-        detections = event.instance_detections2D
-        if detections is None:
-            return cond_objs, objects
+        detections = event.instance_detections2D if include_detections else None
+        has_detections = detections is not None
+        seg_frame = event.instance_segmentation_frame if include_detections else None
 
-        pos_dict_default = {"x": 0.0, "y": 0.0, "z": 0.0}
+        # Camera pose for 3D→2D expected bbox.
+        # If cameraHorizon already reflects the mount (non-zero after calibrate),
+        # use it alone — do not add nav_camera_mount_deg again.
+        meta = event.metadata
+        cam_pos = meta.get("cameraPosition") or meta["agent"]["position"]
+        yaw_deg = float(meta["agent"]["rotation"]["y"])
+        horizon = float(meta["agent"].get("cameraHorizon", 0.0) or 0.0)
+        if abs(horizon) > 1e-3:
+            pitch_deg = horizon
+        else:
+            pitch_deg = float(self.nav_camera_mount_deg)
+        fov_v = float(self.nav_camera_fov_deg or self.VERTICAL_FOV_DEG)
+        f_px, _fov_h = camera_intrinsics(
+            self.FRAME_WIDTH, self.FRAME_HEIGHT, fov_v
+        )
 
         for obj_dict in arr_objects:
             oid = obj_dict["objectId"]
             obj_type = obj_dict.get("objectType")
             if not is_exportable_object(obj_type=obj_type, object_id=oid):
                 continue
-            if oid not in detections:
-                continue
 
-            bbox = detections[oid]
             color = self.dict_colors.get(oid)
             if color is None:
                 continue
-            # color = np.asarray(event.objects_by_id[oid].color, dtype=np.uint8)
-            visible_pixels = self.get_visible_pixels_from_bbox(event, bbox, color)
-            if visible_pixels == 0:
-                continue
-            cmin, rmin, cmax, rmax = bbox
-            bbox_area = (cmax - cmin) * (rmax - rmin)
-            min_side = min(cmax - cmin, rmax - rmin)
-            occupancy = np.round(visible_pixels / bbox_area, 3)
+
+            # Prefer OOBB corners for projection; AABB for catalog center/size.
+            oobb = obj_dict.get("objectOrientedBoundingBox")
+            aabb = obj_dict.get("axisAlignedBoundingBox")
+            box = None
+            if corners_from_box(oobb):
+                box = oobb
+            elif corners_from_box(aabb):
+                box = aabb
+            else:
+                box = oobb if oobb is not None else (aabb if aabb is not None else {})
+
+            expected_bbox = expected_bbox_from_3d(
+                box,
+                cam_pos,
+                yaw_deg,
+                pitch_deg,
+                self.FRAME_WIDTH,
+                self.FRAME_HEIGHT,
+                f_px,
+                clamp_to_image=True,
+            )
+            if expected_bbox is not None:
+                expected_bbox_area = float(expected_bbox["area"])
+                expected_cmin = float(expected_bbox["cmin"])
+                expected_cmax = float(expected_bbox["cmax"])
+                expected_rmin = float(expected_bbox["rmin"])
+                expected_rmax = float(expected_bbox["rmax"])
+                ang_width_deg, ang_height_deg = angular_size_deg(
+                    expected_cmin,
+                    expected_cmax,
+                    expected_rmin,
+                    expected_rmax,
+                    self.FRAME_WIDTH,
+                    self.FRAME_HEIGHT,
+                    f_px,
+                )
+            else:
+                expected_bbox_area = None
+                expected_cmin = None
+                expected_cmax = None
+                expected_rmin = None
+                expected_rmax = None
+                ang_width_deg = None
+                ang_height_deg = None
+
+            # Catalog / objects-*.csv — 3D metadata (not segmentation).
+            # AABB center/size; never default to zeros from an OOBB without those fields.
+            center, size = box_center_size(aabb=aabb, oobb=oobb)
+            objects[oid] = (
+                obj_type,
+                oid,
+                tuple(color),
+                tuple(self.round_number(obj_dict["position"], 2)),
+                tuple(self.round_number(obj_dict["rotation"], 2)),
+                tuple(obj_dict["receptacleObjectIds"])
+                if obj_dict.get("receptacleObjectIds") is not None
+                else (),
+                tuple(self.round_number(center, 2)),
+                tuple(self.round_number(size, 2)),
+            )
 
             dist = float(obj_dict.get("distance") or 0.0)
+            bbox = None
+            visible_pixels = None
+            bbox_area = None
+            min_side = None
+            occupancy = None
+
+            # Pixel metrics only on synthesis-stride steps (from the nav event)
+            if (
+                include_detections
+                and has_detections
+                and seg_frame is not None
+                and oid in detections
+            ):
+                cand = detections[oid]
+                visible_pixels = self.get_visible_pixels_from_bbox(event, cand, color)
+                if visible_pixels > 0:
+                    cmin, rmin, cmax, rmax = cand
+                    bbox_area = (cmax - cmin) * (rmax - rmin)
+                    if bbox_area > 0:
+                        bbox = cand
+                        min_side = min(cmax - cmin, rmax - rmin)
+                        occupancy = np.round(visible_pixels / bbox_area, 3)
+                    else:
+                        visible_pixels = None
+                        bbox_area = None
+                else:
+                    visible_pixels = None
+
+            # Always a nav row: id + distance every step; 3D-expected metrics when
+            # projectable; detection metrics may be None off-stride / out of FOV.
+            # Layout: [oid, dist, det_bbox, exp_area, ang_w, ang_h,
+            #          exp_cmin, exp_cmax, exp_rmin, exp_rmax,
+            #          vis_px, det_area, min_side, occ, displaced]
+            was_displaced = oid in self.displaced_object_ids
             cond_objs.append(
                 [
                     oid,
                     np.round(dist, 4),
-                    bbox,
+                    bbox if bbox is not None else [None, None, None, None],
+                    None
+                    if expected_bbox_area is None
+                    else float(np.round(expected_bbox_area, 2)),
+                    None
+                    if ang_width_deg is None
+                    else float(np.round(ang_width_deg, 2)),
+                    None
+                    if ang_height_deg is None
+                    else float(np.round(ang_height_deg, 2)),
+                    None
+                    if expected_cmin is None
+                    else float(np.round(expected_cmin, 2)),
+                    None
+                    if expected_cmax is None
+                    else float(np.round(expected_cmax, 2)),
+                    None
+                    if expected_rmin is None
+                    else float(np.round(expected_rmin, 2)),
+                    None
+                    if expected_rmax is None
+                    else float(np.round(expected_rmax, 2)),
                     visible_pixels,
                     bbox_area,
                     min_side,
                     occupancy,
+                    was_displaced,
                 ]
             )
 
-            aabb = obj_dict.get("axisAlignedBoundingBox")
-            oobb = obj_dict.get("objectOrientedBoundingBox")
-            box = aabb if aabb is not None else oobb
-            if box is None:
-                box = {}
-
-            objects.add(
-                (
-                    obj_type,
-                    oid,
-                    tuple(color),
-                    tuple(self.round_number(obj_dict["position"], 2)),
-                    tuple(self.round_number(obj_dict["rotation"], 2)),
-                    tuple(obj_dict["receptacleObjectIds"])
-                    if obj_dict.get("receptacleObjectIds") is not None
-                    else (),
-                    tuple(self.round_number(box.get("center", pos_dict_default), 2)),
-                    tuple(self.round_number(box.get("size", pos_dict_default), 2)),
-                )
-            )
         return cond_objs, objects
 
     def save_data_by_axis(self, dict_data, base_name, array):
@@ -243,26 +360,83 @@ class Collector:
             dict_navigation["obj-id"].append(None)
             dict_navigation["obj-distance"].append(None)
             self.save_bbox(dict_navigation, [None, None, None, None])
+            dict_navigation["expected-bbox-area"].append(None)
+            dict_navigation["ang-width-deg"].append(None)
+            dict_navigation["ang-height-deg"].append(None)
+            dict_navigation["expected_cmin"].append(None)
+            dict_navigation["expected_cmax"].append(None)
+            dict_navigation["expected_rmin"].append(None)
+            dict_navigation["expected_rmax"].append(None)
             dict_navigation["visible-pixels"].append(None)
             dict_navigation["bbox-area"].append(None)
             dict_navigation["min-side"].append(None)
             dict_navigation["occupancy-ratio"].append(None)
+            dict_navigation["displaced"].append(None)
+            return
 
         for object_data in objects_data:
             self.add_basic_navigation_data(dict_navigation, key)
             dict_navigation["obj-id"].append(object_data[0])
             dict_navigation["obj-distance"].append(object_data[1])
-            self.save_bbox(dict_navigation, object_data[2])
-            if len(object_data) >= 7:
-                dict_navigation["visible-pixels"].append(object_data[3])
-                dict_navigation["bbox-area"].append(object_data[4])
-                dict_navigation["min-side"].append(object_data[5])
-                dict_navigation["occupancy-ratio"].append(object_data[6])
+            bbox = object_data[2] if len(object_data) > 2 else [None, None, None, None]
+            if bbox is None:
+                bbox = [None, None, None, None]
+            self.save_bbox(dict_navigation, bbox)
+            # Layout: [oid, dist, bbox, exp_area, ang_w, ang_h,
+            #          exp_cmin, exp_cmax, exp_rmin, exp_rmax,
+            #          vis_px, area, min_side, occ, displaced]
+            if len(object_data) >= 15:
+                dict_navigation["expected-bbox-area"].append(object_data[3])
+                dict_navigation["ang-width-deg"].append(object_data[4])
+                dict_navigation["ang-height-deg"].append(object_data[5])
+                dict_navigation["expected_cmin"].append(object_data[6])
+                dict_navigation["expected_cmax"].append(object_data[7])
+                dict_navigation["expected_rmin"].append(object_data[8])
+                dict_navigation["expected_rmax"].append(object_data[9])
+                dict_navigation["visible-pixels"].append(object_data[10])
+                dict_navigation["bbox-area"].append(object_data[11])
+                dict_navigation["min-side"].append(object_data[12])
+                dict_navigation["occupancy-ratio"].append(object_data[13])
+                dict_navigation["displaced"].append(bool(object_data[14]))
+            elif len(object_data) >= 14:
+                dict_navigation["expected-bbox-area"].append(object_data[3])
+                dict_navigation["ang-width-deg"].append(object_data[4])
+                dict_navigation["ang-height-deg"].append(object_data[5])
+                dict_navigation["expected_cmin"].append(object_data[6])
+                dict_navigation["expected_cmax"].append(object_data[7])
+                dict_navigation["expected_rmin"].append(object_data[8])
+                dict_navigation["expected_rmax"].append(object_data[9])
+                dict_navigation["visible-pixels"].append(object_data[10])
+                dict_navigation["bbox-area"].append(object_data[11])
+                dict_navigation["min-side"].append(object_data[12])
+                dict_navigation["occupancy-ratio"].append(object_data[13])
+                dict_navigation["displaced"].append(None)
             else:
-                dict_navigation["visible-pixels"].append(None)
-                dict_navigation["bbox-area"].append(None)
-                dict_navigation["min-side"].append(None)
-                dict_navigation["occupancy-ratio"].append(None)
+                # Legacy shorter rows
+                dict_navigation["expected-bbox-area"].append(
+                    object_data[3] if len(object_data) > 3 else None
+                )
+                dict_navigation["ang-width-deg"].append(
+                    object_data[4] if len(object_data) > 4 else None
+                )
+                dict_navigation["ang-height-deg"].append(
+                    object_data[5] if len(object_data) > 5 else None
+                )
+                dict_navigation["expected_cmin"].append(None)
+                dict_navigation["expected_cmax"].append(None)
+                dict_navigation["expected_rmin"].append(None)
+                dict_navigation["expected_rmax"].append(None)
+                if len(object_data) >= 10:
+                    dict_navigation["visible-pixels"].append(object_data[6])
+                    dict_navigation["bbox-area"].append(object_data[7])
+                    dict_navigation["min-side"].append(object_data[8])
+                    dict_navigation["occupancy-ratio"].append(object_data[9])
+                else:
+                    dict_navigation["visible-pixels"].append(None)
+                    dict_navigation["bbox-area"].append(None)
+                    dict_navigation["min-side"].append(None)
+                    dict_navigation["occupancy-ratio"].append(None)
+                dict_navigation["displaced"].append(None)
 
     def save_image(self, im_path, event):
         cv2.imwrite(im_path, event.cv2img)
@@ -281,10 +455,6 @@ class Collector:
             "ag-rot-x": [],
             "ag-rot-y": [],
             "ag-rot-z": [],
-            "cmin": [],
-            "rmin": [],
-            "cmax": [],
-            "rmax": [],
             "camera-horizon": [],
             "camera-pos-x": [],
             "camera-pos-y": [],
@@ -296,10 +466,22 @@ class Collector:
             "seen-rooms": [],
             "obj-id": [],
             "obj-distance": [],
+            "cmin": [],
+            "rmin": [],
+            "cmax": [],
+            "rmax": [],
+            "expected-bbox-area": [],
+            "ang-width-deg": [],
+            "ang-height-deg": [],
+            "expected_cmin": [],
+            "expected_cmax": [],
+            "expected_rmin": [],
+            "expected_rmax": [],
             "visible-pixels": [],
             "bbox-area": [],
             "min-side": [],
             "occupancy-ratio": [],
+            "displaced": [],
             "path": [],
         }
         for key in self.dict_agent:
@@ -325,7 +507,7 @@ class Collector:
             "size-y": [],
             "size-z": [],
         }
-        for t in self.data_objects["objects"]:
+        for t in self.data_objects.values():
             dict_objects["obj-type"].append(t[0])
             dict_objects["obj-id"].append(t[1])
             dict_objects["obj-color"].append(t[2])
@@ -469,46 +651,38 @@ class Collector:
             cols["region_type"].append(entry["region_type"])
         return cols
 
-    def update_visibility_tracking(self, detections, pickupable_meta):
-        """Update which pickupable objects have been seen / are currently hidden.
+    def update_visibility_tracking(self, visible_pickupable_meta):
+        """Track pickupables using THOR ``visible`` (not instance_detections2D).
 
-        pickupable_meta should only include objects currently in the nav FOV
-        (and optionally already-tracked ids) to avoid full-scene scans each step.
+        ``visible_pickupable_meta`` maps objectId → metadata for pickupables with
+        ``visible=True`` this step (within ``visibilityDistance``).
         """
-        fov_ids = set(detections.keys()) if detections is not None else set()
-        # Update already-tracked objects
+        visible_ids = set(visible_pickupable_meta.keys())
         for oid, track in self.tracked_objects.items():
-            if oid in fov_ids:
-                track["last_in_fov_t"] = self.timestep
+            if oid in visible_ids:
+                track["last_visible_t"] = self.timestep
                 track["hidden_steps"] = 0
             else:
                 track["hidden_steps"] += 1
-        # Discover new pickupables only from FOV metadata
-        for oid, meta in pickupable_meta.items():
+        for oid, meta in visible_pickupable_meta.items():
             if oid in self.tracked_objects:
-                continue
-            if oid not in fov_ids:
                 continue
             self.tracked_objects[oid] = {
                 "obj_type": meta.get("objectType"),
                 "first_seen_t": self.timestep,
-                "last_in_fov_t": self.timestep,
+                "last_visible_t": self.timestep,
                 "hidden_steps": 0,
                 "displaced": False,
             }
 
-    def candidates_for_displacement(self, detections):
-        """Pickupable objects seen before, out of nav FOV for >=1 step, not yet moved."""
+    def candidates_for_displacement(self):
+        """Pickupables seen before (visible once), now not visible for ≥2 steps, not moved."""
         if len(self.displaced_object_ids) >= self.max_displacements:
             return []
-        fov_ids = set(detections.keys()) if detections is not None else set()
         candidates = []
         for oid, track in self.tracked_objects.items():
             if track["displaced"] or oid in self.displaced_object_ids:
                 continue
-            if oid in fov_ids:
-                continue
-            # Need >=2 hidden steps so object_state can show hidden-at-L0 before the move
             if track["hidden_steps"] < 2:
                 continue
             if track["first_seen_t"] >= self.timestep:
@@ -645,6 +819,7 @@ class Collector:
         action_success=None,
         held_obj_id=None,
         object_states=None,
+        include_detections=False,
     ):
         # Truncate like an LLM context window: keep only the first max_steps frames
         if self.at_capacity:
@@ -693,12 +868,23 @@ class Collector:
                 bool(action_success) if action_success is not None else None
             )
             self.dict_agent[key]["held_obj_id"] = held_obj_id
-            cond_objs, objects = self.get_object_data(v_objects, controller)
+            # Nav: id+distance every step; bbox/mask only when synthesis ran.
+            # Use the nav ``event`` (not last_event) so displace PlaceObject steps
+            # cannot wipe stride detections.
+            cond_objs, objects = self.get_object_data(
+                v_objects, event, include_detections=include_detections
+            )
             self.dict_agent[key]["objects"] = cond_objs
-            if self.data_objects["objects"]:
-                self.data_objects["objects"].update(objects)
-            else:
-                self.data_objects["objects"] = objects
+            # Prefer non-zero center/size when merging catalog rows for the same oid
+            for oid, row in objects.items():
+                prev = self.data_objects.get(oid)
+                if prev is None:
+                    self.data_objects[oid] = row
+                    continue
+                prev_size = sum(abs(float(v)) for v in prev[7])
+                new_size = sum(abs(float(v)) for v in row[7])
+                if new_size >= prev_size:
+                    self.data_objects[oid] = row
 
             if door_states:
                 for door in door_states:
@@ -813,11 +999,13 @@ class Collector:
             "num_displacements": len(self.data_displacement_events),
             "num_tracked_objects": len(self.tracked_objects),
             "displacement_fail_stages": fail_counts,
+            "fov_stride": self.fov_stride,
             "camera": {
                 "width": self.FRAME_WIDTH,
                 "height": self.FRAME_HEIGHT,
                 "frame_size_px": self.FRAME_SIZE_PX,
-                "fov_vertical_deg": self.VERTICAL_FOV_DEG,
+                "fov_vertical_deg": self.nav_camera_fov_deg,
+                "nav_camera_mount_deg": self.nav_camera_mount_deg,
                 "source": "nav (INTEL) camera",
             },
             "agent": {

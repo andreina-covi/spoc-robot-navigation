@@ -12,7 +12,7 @@ from environment.stretch_controller import StretchController
 from tasks.abstract_task import AbstractSPOCTask
 from utils.distance_calculation_utils import position_dist
 from utils.type_utils import RewardConfig, THORActions
-from utils.constants.object_constants import is_exportable_object
+from utils.constants.object_constants import is_exportable_object, CAP_PER_EPISODE
 from training.online.reward.reward_shaper import RoomVisitRewardShaper
 from collector import Collector
 
@@ -90,6 +90,26 @@ class RoomVisitTask(AbstractSPOCTask):
         self._pickupable_ids: Optional[Set[str]] = None
         self._receptacles_by_room: Dict[str, List[Dict[str, Any]]] = {}
         self._last_door_states = None
+        # FOV instance synthesis every ``stride`` agent steps (see ``_step``).
+        if collector_max_steps is not None and collector_max_steps > 0:
+            self.stride = max(1, int(collector_max_steps) // CAP_PER_EPISODE)
+        else:
+            self.stride = 1
+        self._sync_collector_horizon()
+
+    def _sync_collector_horizon(self):
+        """Keep collector max_steps / FOV stride / nav camera params in sync."""
+        if self.max_steps is not None and self.max_steps > 0:
+            self.collector.max_steps = self.max_steps
+            self.stride = max(1, int(self.max_steps) // CAP_PER_EPISODE)
+        self.collector.fov_stride = self.stride
+        # Actual RotateCameraMount / FOV from StretchController.calibrate_agent
+        mount = getattr(self.controller, "nav_camera_mount_deg", None)
+        fov = getattr(self.controller, "nav_camera_fov_deg", None)
+        if mount is not None:
+            self.collector.nav_camera_mount_deg = float(mount)
+        if fov is not None:
+            self.collector.nav_camera_fov_deg = float(fov)
 
     def build_world_layout(self) -> Dict[str, Any]:
         """Survey-knowledge layout: regions, landmarks, passages, connectivity."""
@@ -301,20 +321,57 @@ class RoomVisitTask(AbstractSPOCTask):
             result.append(obj)
         return result
 
-    def _gather_fov_pickupable_meta(self, detections) -> Dict[str, Any]:
-        """Pickupable objects in nav FOV — used only for displacement tracking."""
-        if detections is None:
-            return {}
+    def _gather_visible_pickupable_meta(self) -> Dict[str, Any]:
+        """Pickupables with THOR ``visible=True`` (uses visibilityDistance, no synthesis)."""
         pickupable_ids = self._ensure_pickupable_ids()
         result = {}
-        for oid in detections.keys():
-            if oid not in pickupable_ids:
-                continue
-            try:
-                result[oid] = self.controller.get_object(oid, include_receptacle_info=True)
-            except Exception:
-                continue
+        with self.controller.include_object_metadata_context():
+            for o in self.controller.controller.last_event.metadata["objects"]:
+                oid = o.get("objectId")
+                if oid not in pickupable_ids:
+                    continue
+                if not o.get("visible", False):
+                    continue
+                try:
+                    result[oid] = self.controller.get_object(
+                        oid, include_receptacle_info=True
+                    )
+                except Exception:
+                    result[oid] = o
         return result
+
+    def _gather_visible_exportable_objects(self) -> List[Any]:
+        """Named non-structural objects with THOR ``visible=True`` (every step).
+
+        Restores fridge / door / window / furniture that older always-on-synthesis
+        runs logged via FOV, without requiring ``renderImageSynthesis``.
+        Pickupables already covered by tracking are included here too when visible.
+        """
+        result = []
+        with self.controller.include_object_metadata_context():
+            for o in self.controller.controller.last_event.metadata["objects"]:
+                oid = o.get("objectId")
+                if not o.get("visible", False):
+                    continue
+                if not is_exportable_object(
+                    obj_type=o.get("objectType"), object_id=oid
+                ):
+                    continue
+                try:
+                    result.append(
+                        self.controller.get_object(oid, include_receptacle_info=True)
+                    )
+                except Exception:
+                    result.append(o)
+        return result
+
+    def _object_is_visible(self, object_id: str) -> bool:
+        """THOR metadata ``visible`` for an object (no instance_detections2D)."""
+        try:
+            obj = self.controller.get_object(object_id)
+            return bool(obj.get("visible", False))
+        except Exception:
+            return False
 
     def _receptacles_in_room(self, room_id: str) -> List[Dict[str, Any]]:
         if room_id in self._receptacles_by_room:
@@ -334,15 +391,6 @@ class RoomVisitTask(AbstractSPOCTask):
                     receptacles.append(o)
         self._receptacles_by_room[room_id] = receptacles
         return receptacles
-
-    def _refresh_nav_detections(self):
-        self.controller.controller.step("Pass", renderImageSynthesis=True)
-        return self.controller.controller.last_event.instance_detections2D or {}
-
-    def _oid_in_nav_fov(self, object_id: str, detections=None) -> bool:
-        if detections is None:
-            detections = self.controller.controller.last_event.instance_detections2D or {}
-        return object_id in detections
 
     def _restore_object_pose(self, object_id: str, position, rotation=None) -> bool:
         """Put object back after a rejected (still-visible) relocation."""
@@ -379,9 +427,10 @@ class RoomVisitTask(AbstractSPOCTask):
         from_pos,
         from_rotation=None,
     ):
-        """Place object on receptacle only if the new pose stays outside nav FOV.
+        """Place object on receptacle only if the new pose stays ``visible=False``.
 
-        If a candidate pose becomes visible in the nav camera, undo and try another.
+        Uses THOR ``visible`` (visibilityDistance), not instance_detections2D.
+        If a candidate pose becomes visible, undo and try another.
         Returns (success, info).
         """
         info = {
@@ -428,13 +477,11 @@ class RoomVisitTask(AbstractSPOCTask):
                 info["last_error"] = str(err) if err is not None else "PlaceObjectAtPoint_failed"
                 continue
 
-            detections_after = self._refresh_nav_detections()
-            if self._oid_in_nav_fov(object_id, detections_after):
-                # Would "appear from nothing" in the saved nav image — reject & undo
+            if self._object_is_visible(object_id):
+                # Still within visibilityDistance of the agent — reject & undo
                 info["n_undone_visible"] += 1
                 self._restore_object_pose(object_id, from_pos, from_rotation)
-                self._refresh_nav_detections()
-                info["last_error"] = "placed_but_visible_in_nav_fov_undone"
+                info["last_error"] = "placed_but_visible_undone"
                 continue
 
             info["placed_pos"] = pos
@@ -442,11 +489,11 @@ class RoomVisitTask(AbstractSPOCTask):
 
         return False, info
 
-    def maybe_displace_hidden_objects(self, detections) -> List[Dict[str, Any]]:
-        """Move previously seen pickupable objects only while they stay out of nav FOV.
+    def maybe_displace_hidden_objects(self) -> List[Dict[str, Any]]:
+        """Move previously seen pickupables only while THOR ``visible`` is False.
 
-        Goal: agent saw object at L0, later L0 is off-camera, object moves to L1 while
-        still off-camera — so it never pops into the navigation view mid-episode.
+        Seen = ``visible=True`` at least once; displace after ≥2 steps with
+        ``visible=False``, and only keep the move if still not visible after place.
         """
         events = []
         if self._displacements_this_step >= self.max_displacements_per_step:
@@ -454,26 +501,25 @@ class RoomVisitTask(AbstractSPOCTask):
         if len(self.collector.displaced_object_ids) >= self.collector.max_displacements:
             return events
 
-        candidates = self.collector.candidates_for_displacement(detections)
+        candidates = self.collector.candidates_for_displacement()
         if not candidates:
             return events
 
         # Only attempt one candidate per step (max_displacements_per_step)
         candidates = candidates[:1]
 
-        fov_ids = set(detections.keys()) if detections is not None else set()
         for oid in candidates:
             if self._displacements_this_step >= self.max_displacements_per_step:
                 break
 
-            # Hard requirement: not in nav camera before moving
-            if oid in fov_ids:
+            # Hard requirement: not visible before moving
+            if self._object_is_visible(oid):
                 self.collector.log_displacement_debug(
                     {
                         "obj_id": oid,
                         "status": "fail",
-                        "stage": "still_in_fov",
-                        "detail": "refusing displace while object is in nav detections",
+                        "stage": "still_visible",
+                        "detail": "refusing displace while object visible=True",
                     }
                 )
                 continue
@@ -519,7 +565,6 @@ class RoomVisitTask(AbstractSPOCTask):
             from_pos_rounded = self.collector.round_number(from_pos, 2)
             from_rot = obj_before.get("rotation")
             visible_before = bool(obj_before.get("visible", False))
-            in_fov_before = False
 
             receptacles = list(self._receptacles_in_room(room_id))
             # Prefer current receptacle first (cup left→right on same table), then others
@@ -604,25 +649,20 @@ class RoomVisitTask(AbstractSPOCTask):
                 )
                 continue
 
-            detections_after = (
-                self.controller.controller.last_event.instance_detections2D or {}
-            )
-            in_fov_after = oid in detections_after
-            if in_fov_after:
-                # Final safety: never keep a pop-into-view relocation
+            visible_after = bool(obj_after.get("visible", False))
+            if visible_after:
                 self._restore_object_pose(oid, from_pos, from_rot)
-                self._refresh_nav_detections()
                 self.collector.log_displacement_debug(
                     {
                         "obj_id": oid,
                         "status": "fail",
                         "stage": "visible_after_final_check",
-                        "detail": "undone; object was still in nav FOV",
+                        "detail": "undone; object still visible=True",
                         "room_id": room_id,
                         "from_receptacle": from_receptacle,
                         "to_receptacle": to_receptacle,
                         "n_undone_visible": n_undone_visible + 1,
-                        "last_error": "final_fov_check_failed",
+                        "last_error": "final_visible_check_failed",
                     }
                 )
                 continue
@@ -652,8 +692,9 @@ class RoomVisitTask(AbstractSPOCTask):
                 "to_pos": to_pos_rounded,
                 "hidden_during": True,
                 "visible_just_before": visible_before,
-                "visible_just_after": bool(obj_after.get("visible", False)),
-                "in_fov_just_before": in_fov_before,
+                "visible_just_after": False,
+                # Schema compat: mirrors THOR visible (not detections2D)
+                "in_fov_just_before": visible_before,
                 "in_fov_just_after": False,
                 "moved_via": "direct",
                 "notes": notes,
@@ -681,12 +722,15 @@ class RoomVisitTask(AbstractSPOCTask):
             self._displacements_this_step += 1
         return events
 
-    def _build_object_state_rows(self, detections) -> List[Dict[str, Any]]:
-        """Per-timestep true state for all tracked (interest) objects, including hidden."""
+    def _build_object_state_rows(self, detections=None) -> List[Dict[str, Any]]:
+        """Per-timestep true state for all tracked objects, including hidden.
+
+        ``in_camera_fov`` mirrors THOR ``visible`` (visibilityDistance), not
+        instance_detections2D. Optional ``detections`` is ignored (kept for call compat).
+        """
         tracked_ids = set(self.collector.tracked_objects.keys())
         if not tracked_ids:
             return []
-        fov_ids = set(detections.keys()) if detections is not None else set()
         rows = []
         receptacle_open = {}
         for oid in tracked_ids:
@@ -708,14 +752,27 @@ class RoomVisitTask(AbstractSPOCTask):
                     except Exception:
                         receptacle_open[pid] = None
                 rec_open = receptacle_open[pid]
+            is_visible = bool(obj.get("visible", False))
             rows.append(
                 {
                     "obj_meta": obj,
-                    "in_camera_fov": oid in fov_ids,
+                    "in_camera_fov": is_visible,
                     "receptacle_is_open": rec_open,
                 }
             )
         return rows
+
+    def _gather_tracked_object_meta(self) -> List[Any]:
+        """Metadata for tracked pickupables (no FOV / detections required)."""
+        result = []
+        for oid in self.collector.tracked_objects:
+            try:
+                result.append(
+                    self.controller.get_object(oid, include_receptacle_info=True)
+                )
+            except Exception:
+                continue
+        return result
 
     def min_l2_distance_to_target(self):
         distances = self.get_room_distances()
@@ -749,9 +806,8 @@ class RoomVisitTask(AbstractSPOCTask):
         self._took_sub_done_action = False
         self._displacements_this_step = 0
 
-        # Eval patches task.max_steps after __init__; keep collector in sync
-        if self.max_steps is not None and self.max_steps > 0:
-            self.collector.max_steps = self.max_steps
+        # Eval patches task.max_steps after __init__; keep collector + FOV stride in sync
+        self._sync_collector_horizon()
 
         if action_str == THORActions.done:
             self._took_end_action = True
@@ -769,63 +825,68 @@ class RoomVisitTask(AbstractSPOCTask):
             else:
                 self.last_action_success = False
         else:
-            event = self.controller.agent_step(action=action_str)
+            # Expensive: instance_detections2D / masks / segmentation frame.
+            # Gate on collector.timestep so logged frames stay evenly spaced.
+            render_mask_this_step = self.collector.timestep % self.stride == 0
+            event = self.controller.agent_step(
+                action=action_str,
+                render_image_synthesis=render_mask_this_step,
+            )
             self.last_action_success = bool(event)
-            # Skip expensive FOV logging once the collector step budget is full
+
             if not self.collector.at_capacity:
-                detections = self.controller.controller.last_event.instance_detections2D
-                if (
-                    self.controller.controller.last_event.instance_segmentation_frame is None
-                    or detections is None
-                ):
-                    print("instance segmentation is none")
-                else:
-                    raw_detections = (
-                        detections or {}
-                    )
-                    # Export: named non-structural FOV objects (+ visibility metrics in CSV)
-                    export_dets = self.collector.filter_export_detections(raw_detections)
-                    objects = self._gather_fov_all_objects(export_dets)
-                    # objects_by_id = {o["objectId"]: o for o in objects}
+                current_room = self.get_current_room()
+                room_info = {
+                    "current_room": current_room,
+                    "current_room_type": (
+                        self.room_type_dict.get(current_room)
+                        if current_room is not None
+                        else None
+                    ),
+                    "seen_rooms": list(self.seen_rooms),
+                }
+                door_states = self.get_door_states()
 
-                    # # Displacement "seen": only recognizable (shown % / size thresholds)
-                    # recognizable = self.collector.filter_recognizable_detections(
-                    #     export_dets,
-                    #     self.controller.controller,
-                    #     objects_by_id=objects_by_id,
-                    # )
+                # Every step: tracked pickupables + all THOR-visible named objects
+                # (fridge / door / window / furniture — not only pickupables).
+                # Synthesis strides additionally merge FOV detections for bbox metrics.
+                by_id = {o["objectId"]: o for o in self._gather_tracked_object_meta()}
+                for o in self._gather_visible_exportable_objects():
+                    by_id[o["objectId"]] = o
+                include_detections = False
+                if render_mask_this_step:
+                    detections = event.instance_detections2D
+                    if (
+                        event.instance_segmentation_frame is not None
+                        and detections is not None
+                    ):
+                        include_detections = True
+                        export_dets = self.collector.filter_export_detections(
+                            detections or {}
+                        )
+                        for o in self._gather_fov_all_objects(export_dets):
+                            by_id[o["objectId"]] = o
+                objects = list(by_id.values())
 
-                    # 1) Discover pickupables only when recognizable; "hidden" uses raw FOV
-                    pickupable_meta = self._gather_fov_pickupable_meta(export_dets)
-                    self.collector.update_visibility_tracking(raw_detections, pickupable_meta)
+                # Every step: THOR ``visible`` tracking + displacement (no detections2D)
+                visible_pickupables = self._gather_visible_pickupable_meta()
+                self.collector.update_visibility_tracking(visible_pickupables)
+                self.maybe_displace_hidden_objects()
 
-                    # 2) Relocate when out of ALL nav pixels
-                    self.maybe_displace_hidden_objects(raw_detections)
+                object_states = self._build_object_state_rows()
 
-                    # 3) Log named non-structural FOV objects; post-process uses metrics
-                    current_room = self.get_current_room()
-                    room_info = {
-                        "current_room": current_room,
-                        "current_room_type": (
-                            self.room_type_dict.get(current_room)
-                            if current_room is not None
-                            else None
-                        ),
-                        "seen_rooms": list(self.seen_rooms),
-                    }
-                    door_states = self.get_door_states()
-                    object_states = self._build_object_state_rows(raw_detections)
-                    self.collector.collect_data(
-                        event,
-                        action_str,
-                        objects,
-                        self.controller.controller,
-                        room_info=room_info,
-                        door_states=door_states,
-                        action_success=self.last_action_success,
-                        held_obj_id=self._get_held_obj_id(),
-                        object_states=object_states,
-                    )
+                self.collector.collect_data(
+                    event,
+                    action_str,
+                    objects,
+                    self.controller.controller,
+                    room_info=room_info,
+                    door_states=door_states,
+                    action_success=self.last_action_success,
+                    held_obj_id=self._get_held_obj_id(),
+                    object_states=object_states,
+                    include_detections=include_detections,
+                )
 
             position = self.controller.get_current_agent_position()
             self.path.append(position)

@@ -59,6 +59,9 @@ class StretchController:
 
         self.room_poly_map: Optional[Dict[str, Polygon]] = None
         self.room_type_dict: Optional[Dict[str, str]] = None
+        # Set in calibrate_agent (RotateCameraMount / ChangeFOV on nav camera).
+        self.nav_camera_mount_deg = 27.0
+        self.nav_camera_fov_deg = float(INTEL_VERTICAL_FOV)
 
         if initialize_controller:
             self.controller = Controller(**kwargs)
@@ -188,10 +191,10 @@ class StretchController:
         return dict(x=x, y=y, z=z)
 
     def step(self, **kwargs):
-        if "renderImageSynthesis" not in kwargs:
-            # kwargs["renderImageSynthesis"] = self.should_render_image_synthesis
-            ## for getting instance_masks, instance_segmentation_frame or instance_detections2d you need to modify to:
-            kwargs["renderImageSynthesis"] = True
+        # Instance segmentation / detections2D / masks are only filled when this is True.
+        # Callers (e.g. RoomVisit stride) pass True only when needed; otherwise keep False
+        # unless depth/normals/flow were requested at init.
+        kwargs.setdefault("renderImageSynthesis", self.should_render_image_synthesis)
         return self.controller.step(**kwargs)
 
     def get_top_down_path_view(self, agent_path, targets_to_highlight=None):
@@ -227,16 +230,20 @@ class StretchController:
 
     def calibrate_agent(self):
         self.step(action="Teleport", horizon=0, standing=True)
+        nav_mount = float(27.0 + random.choice(np.arange(-2, 2, 0.2)))
         self.step(
             action="RotateCameraMount",
-            degrees=27.0 + random.choice(np.arange(-2, 2, 0.2)),
+            degrees=nav_mount,
             secondary=False,
         )
+        nav_fov = float(59 + random.choice(np.arange(-1, 1, 0.1)))
         self.step(
             action="ChangeFOV",
-            fieldOfView=59 + random.choice(np.arange(-1, 1, 0.1)),
+            fieldOfView=nav_fov,
             camera="FirstPersonCharacter",
         )
+        self.nav_camera_mount_deg = nav_mount
+        self.nav_camera_fov_deg = nav_fov
         self.step(
             action="RotateCameraMount",
             degrees=33.0 + random.choice(np.arange(-2, 2, 0.2)),
@@ -503,7 +510,15 @@ class StretchController:
     def stop(self):
         self.controller.stop()
 
-    def agent_step(self, action):
+    def agent_step(self, action, render_image_synthesis=None):
+        """Execute a discrete agent action.
+
+        Args:
+            action: ``THORActions`` name string.
+            render_image_synthesis: If set, overrides whether this step builds
+                ``instance_detections2D`` / masks / ``instance_segmentation_frame``.
+                Pass ``True`` only when FOV object logging needs them (e.g. stride).
+        """
         agents_full_pose_before_action = copy.deepcopy(
             dict(
                 agent_pose=self.get_current_agent_full_pose(),
@@ -593,6 +608,9 @@ class StretchController:
             action_dict = {**action_dict, **ADDITIONAL_ARM_ARGS}
         elif action_dict["action"] == "MoveAgent":
             action_dict = {**action_dict, **ADDITIONAL_NAVIGATION_ARGS}
+
+        if render_image_synthesis is not None:
+            action_dict["renderImageSynthesis"] = bool(render_image_synthesis)
 
         event = self.step(**action_dict)
 

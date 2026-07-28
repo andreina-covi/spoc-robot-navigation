@@ -85,7 +85,7 @@ Each episode root has **two** sibling folders:
 |--------|------------------|
 | `navigation-*.csv` | **Named non-structural** FOV objects with `visible-pixels > 0`, **plus visibility metrics**. Drops Wall/Floor and numeric-only ids (e.g. `2|4`). Post-processing decides keep/drop. |
 | `objects-*.csv` | Catalog of those FOV objects seen at least once (with instance color) |
-| `object_state-*.csv` / displacement | **Pickupable** objects tracked after appearing in nav FOV |
+| `object_state-*.csv` / displacement | **Pickupable** objects tracked after ``visible=True`` at least once |
 | `current-room` / `region_trajectory` | **Agent–room** membership (do **not** treat Floor/Wall as the room object) |
 
 **Export vs filter (recommended policy):**
@@ -101,10 +101,14 @@ Each episode root has **two** sibling folders:
 
 | Column | Meaning |
 |--------|---------|
-| `visible-pixels` | Mask pixels of the object inside its bbox |
+| `expected-bbox-area` | On-screen projected area from 3D OBB/AABB corners (`geometry.py`; clamped to frame) |
+| `expected_cmin` / `expected_cmax` / `expected_rmin` / `expected_rmax` | Pixel bounds of that expected bbox (`None` if not projectable) |
+| `ang-width-deg` / `ang-height-deg` | Angular size of that expected bbox (degrees) |
+| `visible-pixels` | Mask pixels of the object inside its detection bbox |
 | `bbox-area` | Detection box area `(cmax-cmin)*(rmax-rmin)` |
-| `min-side` | `min(width, height)` of the bbox |
+| `min-side` | `min(width, height)` of the detection bbox |
 | `occupancy-ratio` | `visible-pixels / bbox-area` |
+| `displaced` | `True` if this object was successfully relocated earlier in the episode (still logged; filter in post-processing if needed) |
 
 Example post-process keep rule: apply your own cutoffs on
 `visible-pixels` / `min-side` / `occupancy-ratio`.
@@ -121,7 +125,7 @@ they were tracked.
 
 **`object_state-*.csv`** (per timestep × tracked pickupable; includes hidden rows):
 
-- `timestep`, `obj-id`, `obj-type`, pose, `visible` (THOR), `in_camera_fov` (nav `instance_detections2D`)
+- `timestep`, `obj-id`, `obj-type`, pose, `visible` (THOR), `in_camera_fov` (mirrors THOR `visible`)
 - `parent_receptacle`, `parent_receptacles`, `is_inside_receptacle`, `receptacle_is_open`
 
 **`displacement_events-*.csv`** (one row per accepted relocate):
@@ -131,9 +135,20 @@ they were tracked.
   - `same_receptacle_hidden_shift` — same surface, different pose (e.g. counter left→right)
   - `other_receptacle_hidden_place` — different receptacle in the same room
 
-**`navigation-*.csv`:** agent poses, rooms, **named non-structural** FOV objects + bbox,
-`visible-pixels`, `bbox-area`, `min-side`, `occupancy-ratio`,
-`action_success`, `held_obj-id`.
+**`navigation-*.csv`:** agent poses, rooms, and **named** objects with `obj-id` /
+`obj-distance` every step when THOR ``visible=True`` (pickupables **and**
+static named objects such as fridge / door / window) or when still tracked.
+`expected-bbox-area` / `expected_cmin`… / `ang-*-deg` come from 3D projection;
+detection bbox metrics only on FOV synthesis strides. Column ``displaced`` marks
+objects that already appear in ``displacement_events`` (new pose is also in
+`object_state` / the event row — use the flag to drop them from some nav analyses).
+
+**`objects-*.csv`:** one row per unique named object seen in the episode.
+`bBox-center-*` / `size-*` are **3D AABB** fields from metadata (not segmentation).
+They should be non-zero whenever THOR provides an AABB (independent of synthesis).
+
+**`displacement_events-*.csv`:** one row per accepted relocate (from/to pose and
+receptacle). Does not replace navigation; pairs with ``displaced=True`` nav rows.
 
 **`world_layout-*.json` / `passage_state` / `region_trajectory`:** survey-oriented layout & room path.
 
@@ -145,17 +160,21 @@ Implemented in `RoomVisitTask.maybe_displace_hidden_objects` / `_try_hidden_plac
 
 ### Eligibility
 
-1. Object is **pickupable** and was seen at least once in **nav** `instance_detections2D`.
-2. Out of nav FOV for **≥ 2** consecutive steps (`collector.candidates_for_displacement`).
+1. Object is **pickupable** and was **`visible=True`** at least once (THOR metadata;
+   distance ≤ `visibilityDistance`).
+2. **`visible=False`** for **≥ 2** consecutive steps (`collector.candidates_for_displacement`).
 3. Caps: `max_displacements=5` / episode, `1` displace / step.
 
 ### Realism rules (avoid “appears from nothing”)
 
-1. Refuse if still in nav detections before place.
+1. Refuse if still **`visible=True`** before place.
 2. `PlaceObjectAtPoint` with **`forceKinematic=True`** (this AI2-THOR Stretch build rejects `forceAction`).
 3. Prefer spawn points ≥ `min_displace_distance` (0.25 m) from origin; try **same receptacle first**, then others in room.
-4. After each place: refresh instance segmentation; if object is **in nav FOV**, **undo** (place back) and try another point.
-5. Only **log** events that stay off-camera (`hidden_during=True`). Never keep a move that pops into the current nav image.
+4. After each place: if **`visible=True`**, **undo** and try another point / receptacle.
+5. Only **log** events that stay not-visible (`hidden_during=True`).
+
+Does **not** require `instance_detections2D` / `renderImageSynthesis` for displacement.
+Those remain stride-gated only for nav bbox / mask metrics.
 
 ### Tunables (`RoomVisitTask.__init__`)
 
@@ -189,6 +208,18 @@ Mitigations already in code:
   the agent never takes `done`.
 - **Incremental CSV flush** every `flush_every` (default 50) steps for navigation /
   doors / object_state / region_trajectory / displacement_debug so RAM stays bounded.
+- **FOV synthesis stride**: `renderInstanceSegmentation=True` at controller init, but
+  per-step `renderImageSynthesis` is `True` only every
+  `stride = max(1, max_steps // CAP_PER_EPISODE)` agent steps for nav bbox / mask metrics.
+  **Invisible displacement** uses THOR ``visible`` every step (with raised
+  `visibilityDistance`) and does **not** need synthesis.
+  **Important:** when synthesis is off, THOR may leave *stale* `instance_detections2D`
+  on `last_event`. Nav still writes `obj-id` / `obj-distance` every step from
+  metadata; bbox / mask columns are filled only when the task passes
+  `include_detections=True` on a real synthesis stride — never from leftover detections.
+  Bbox metrics are read from the **navigation step event**, not `last_event` after
+  displace `PlaceObjectAtPoint` (those steps run without synthesis and would drop
+  detections).
 
 ---
 
@@ -198,7 +229,7 @@ Mitigations already in code:
 |-------|-----|
 | `SPOCObject.get("pickupable", False)` always `False` | Implement `SPOCObject.get()` in `environment/spoc_objects.py` (builtin `dict.get` ignores `__getitem__`) |
 | `PlaceObjectAtPoint(..., forceAction=True)` ValueError | Use `forceKinematic=True` |
-| Objects “appear” after displace | Undo if still in nav FOV; only accept hidden places |
+| Objects “appear” after displace | Undo if still `visible=True`; only accept not-visible places |
 | Scene name always `Procedural` | Use `house_<index>` |
 
 ---

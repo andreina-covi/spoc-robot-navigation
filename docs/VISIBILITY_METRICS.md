@@ -102,7 +102,7 @@ occupancy-ratio  →  “how full is the box with real object pixels?”
 | Keep / drop for training or QA | **Post-processing** using the three metrics above |
 
 Collection does not apply recognizability thresholds to nav export. Displacement tracking
-uses FOV presence separately (see [DATA_COLLECTION.md](DATA_COLLECTION.md)).
+uses THOR `visible` (metadata, `visibilityDistance`) separately (see [DATA_COLLECTION.md](DATA_COLLECTION.md)).
 
 ---
 
