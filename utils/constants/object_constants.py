@@ -409,8 +409,6 @@ STRUCTURAL_OBJECT_TYPES = frozenset(
 
 _STRUCTURAL_OID_PREFIXES = ("Wall|", "Floor|", "Ceiling|", "Doorway|", "Doorframe|", "Room|")
 
-CAP_PER_EPISODE = 50
-
 def is_structural_object(obj_type=None, object_id=None) -> bool:
     """True for walls/floors/ceilings/etc. that should not enter objects / nav FOV lists."""
     if obj_type is not None and obj_type in STRUCTURAL_OBJECT_TYPES:

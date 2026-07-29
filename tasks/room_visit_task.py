@@ -12,9 +12,12 @@ from environment.stretch_controller import StretchController
 from tasks.abstract_task import AbstractSPOCTask
 from utils.distance_calculation_utils import position_dist
 from utils.type_utils import RewardConfig, THORActions
-from utils.constants.object_constants import is_exportable_object, CAP_PER_EPISODE
+from utils.constants.object_constants import is_exportable_object
 from training.online.reward.reward_shaper import RoomVisitRewardShaper
 from collector import Collector
+from online_evaluation.max_episode_configs import MAX_EPISODE_LEN_PER_TASK
+
+CAP_PER_EPISODE = MAX_EPISODE_LEN_PER_TASK["RoomVisit"]
 
 class RoomVisitTask(AbstractSPOCTask):
     task_type_str = "RoomVisit"
