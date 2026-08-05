@@ -60,7 +60,7 @@ transformers
 ipdb
 decorator==4.4.2
 timeout-decorator
-objathor>=0.0.2
+objathor>=0.0.8
 
 # for objaverse pipeline
 trimesh
