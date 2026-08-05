@@ -32,7 +32,7 @@ matplotlib>=3.3.1
 opencv-python
 wheel>=0.36.2
 attrs>=21.4.0
-scipy>=1.5.4
+scipy>=1.17.1
 prior
 canonicaljson
 plotly
