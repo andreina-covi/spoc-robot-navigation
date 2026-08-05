@@ -58,7 +58,7 @@ av
 shortuuid
 transformers
 ipdb
-decorator==4.4.2
+decorator==5.2.1
 timeout-decorator
 objathor>=0.0.2
 
