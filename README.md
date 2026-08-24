@@ -62,6 +62,7 @@ $OBJAVERSE_NAVIGATION_PATH/<MM_DD_YYYY_HH_MM_SS_ffffff>/
     doors-house_XXXXXX.csv
     object_state-house_XXXXXX.csv
     displacement_events-house_XXXXXX.csv
+    displacement_candidates-house_XXXXXX.csv
     displacement_debug-house_XXXXXX.csv
     passage_state-house_XXXXXX.csv
     region_trajectory-house_XXXXXX.csv
@@ -84,7 +85,9 @@ export SCENE=house_XXXXXX
 cat "$RUN/annotations/episode_meta-${SCENE}.json"
 ```
 
-Check `num_displacements`, then `annotations/displacement_events-*.csv` and the corresponding `object_state` track (`in_camera_fov`/`visible` true → false → move while false).  
+Check `num_displacements`, then `annotations/displacement_events-*.csv`,
+`annotations/displacement_candidates-*.csv` (chosen + distractor positions), and the
+corresponding `object_state` track (`in_camera_fov`/`visible` true → false → move while false).
 Full review snippets and question examples: [docs/DATA_COLLECTION.md](docs/DATA_COLLECTION.md) §§7–8.
 
 ---
@@ -113,7 +116,8 @@ python -m spatial_data_generation \
 
 ## 5. Generate QA (legacy spatial templates)
 
-For **invisible displacement / survey** items, use `object_state`, `displacement_events`, and `world_layout` (see [docs/DATA_COLLECTION.md](docs/DATA_COLLECTION.md)).
+For **invisible displacement / survey** items, use `object_state`, `displacement_events`,
+`displacement_candidates`, and `world_layout` (see [docs/DATA_COLLECTION.md](docs/DATA_COLLECTION.md)).
 
 ---
 

@@ -99,10 +99,12 @@ occupancy-ratio  →  “how full is the box with real object pixels?”
 | Output | Policy |
 |--------|--------|
 | `navigation` / `objects` CSV | All **named non-structural** FOV objects with `visible-pixels > 0` + metrics |
+| `object_state` / displacement | **Pickupables** only; eligibility uses the same mask-pixel signal (`in_camera_fov`) |
 | Keep / drop for training or QA | **Post-processing** using the three metrics above |
 
-Collection does not apply recognizability thresholds to nav export. Displacement tracking
-uses THOR `visible` (metadata, `visibilityDistance`) separately (see [DATA_COLLECTION.md](DATA_COLLECTION.md)).
+Collection does not apply recognizability thresholds to nav export. Displacement
+tracking uses nav mask pixels (same signal as `visible-pixels > 0`), not THOR
+metadata `visible` alone (see [DATA_COLLECTION.md](DATA_COLLECTION.md)).
 
 ---
 

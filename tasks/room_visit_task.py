@@ -12,12 +12,15 @@ from environment.stretch_controller import StretchController
 from tasks.abstract_task import AbstractSPOCTask
 from utils.distance_calculation_utils import position_dist
 from utils.type_utils import RewardConfig, THORActions
-from utils.constants.object_constants import is_exportable_object
+from utils.constants.object_constants import is_exportable_object, is_structural_object
 from training.online.reward.reward_shaper import RoomVisitRewardShaper
 from collector import Collector
 from online_evaluation.max_episode_configs import MAX_EPISODE_LEN_PER_TASK
 
 CAP_PER_EPISODE = MAX_EPISODE_LEN_PER_TASK["RoomVisit"]
+
+# xz distance (m): receptacles within this of the chosen destination count as "nearby"
+NEARBY_RECEPTACLE_XZ_M = 1.5
 
 class RoomVisitTask(AbstractSPOCTask):
     task_type_str = "RoomVisit"
@@ -324,23 +327,54 @@ class RoomVisitTask(AbstractSPOCTask):
             result.append(obj)
         return result
 
-    def _gather_visible_pickupable_meta(self) -> Dict[str, Any]:
-        """Pickupables with THOR ``visible=True`` (uses visibilityDistance, no synthesis)."""
+    def _ensure_instance_colors(self, event) -> Dict[str, Any]:
+        """Populate collector instance colors from an event (needed for mask pixels)."""
+        if self.collector.dict_colors:
+            return self.collector.dict_colors
+        colors_meta = (event.metadata or {}).get("colors") or []
+        self.collector.dict_colors = {
+            d["name"]: d["color"] for d in colors_meta if "name" in d and "color" in d
+        }
+        return self.collector.dict_colors
+
+    def _gather_pickupables_in_image(self, event) -> Dict[str, Any]:
+        """Pickupables with mask pixels in the nav camera (matches ``images/`` / nav CSV).
+
+        Uses ``instance_detections2D`` + segmentation ``visible-pixels > 0``, not THOR
+        metadata ``visible``. Only valid when ``event`` ran ``renderImageSynthesis``.
+        """
+        detections = getattr(event, "instance_detections2D", None) or {}
+        seg = getattr(event, "instance_segmentation_frame", None)
+        if not detections or seg is None:
+            return {}
+
         pickupable_ids = self._ensure_pickupable_ids()
+        colors = self._ensure_instance_colors(event)
         result = {}
-        with self.controller.include_object_metadata_context():
-            for o in self.controller.controller.last_event.metadata["objects"]:
-                oid = o.get("objectId")
-                if oid not in pickupable_ids:
-                    continue
-                if not o.get("visible", False):
-                    continue
+        for oid, bbox in detections.items():
+            if oid not in pickupable_ids:
+                continue
+            color = colors.get(oid)
+            if color is not None:
                 try:
-                    result[oid] = self.controller.get_object(
-                        oid, include_receptacle_info=True
+                    pixels = self.collector.get_visible_pixels_from_bbox(
+                        event, bbox, color
                     )
                 except Exception:
-                    result[oid] = o
+                    pixels = 0
+                if pixels <= 0:
+                    continue
+            # No color yet: detection alone is enough to count as in-image.
+            try:
+                result[oid] = self.controller.get_object(
+                    oid, include_receptacle_info=True
+                )
+            except Exception:
+                with self.controller.include_object_metadata_context():
+                    for o in self.controller.controller.last_event.metadata["objects"]:
+                        if o.get("objectId") == oid:
+                            result[oid] = o
+                            break
         return result
 
     def _gather_visible_exportable_objects(self) -> List[Any]:
@@ -368,15 +402,36 @@ class RoomVisitTask(AbstractSPOCTask):
                     result.append(o)
         return result
 
-    def _object_is_visible(self, object_id: str) -> bool:
-        """THOR metadata ``visible`` for an object (no instance_detections2D)."""
+    def _object_in_nav_image(self, object_id: str) -> bool:
+        """True if ``object_id`` has mask pixels in a fresh nav synthesis Pass."""
         try:
-            obj = self.controller.get_object(object_id)
-            return bool(obj.get("visible", False))
+            event = self.controller.controller.step(
+                action="Pass", renderImageSynthesis=True
+            )
         except Exception:
             return False
+        detections = getattr(event, "instance_detections2D", None) or {}
+        if object_id not in detections:
+            return False
+        seg = getattr(event, "instance_segmentation_frame", None)
+        if seg is None:
+            return True
+        colors = self._ensure_instance_colors(event)
+        color = colors.get(object_id)
+        if color is None:
+            return True
+        try:
+            return (
+                self.collector.get_visible_pixels_from_bbox(
+                    event, detections[object_id], color
+                )
+                > 0
+            )
+        except Exception:
+            return True
 
     def _receptacles_in_room(self, room_id: str) -> List[Dict[str, Any]]:
+        """Non-pickupable receptacles in ``room_id`` — **Floor excluded** from the pool."""
         if room_id in self._receptacles_by_room:
             return self._receptacles_by_room[room_id]
         receptacles = []
@@ -386,8 +441,18 @@ class RoomVisitTask(AbstractSPOCTask):
                     continue
                 if o.get("pickupable", False):
                     continue
+                oid = o.get("objectId")
+                # Floor is not a distinctive landmark for directional answers
+                if is_structural_object(
+                    obj_type=o.get("objectType"), object_id=oid
+                ):
+                    continue
+                if oid is not None and str(oid).startswith("Floor|"):
+                    continue
+                if o.get("objectType") == "Floor":
+                    continue
                 try:
-                    r_id, _ = self.controller.get_objects_room_id_and_type(o["objectId"])
+                    r_id, _ = self.controller.get_objects_room_id_and_type(oid)
                 except Exception:
                     continue
                 if r_id == room_id:
@@ -395,10 +460,42 @@ class RoomVisitTask(AbstractSPOCTask):
         self._receptacles_by_room[room_id] = receptacles
         return receptacles
 
+    def _receptacle_is_usable(self, rec: Dict[str, Any]) -> bool:
+        if rec.get("openable", False) and not rec.get("isOpen", False):
+            return False
+        return True
+
+    def _receptacle_center_xz(self, rec: Dict[str, Any]):
+        pos = rec.get("position")
+        if pos is None:
+            box = rec.get("axisAlignedBoundingBox") or {}
+            pos = box.get("center")
+        if pos is None:
+            return None
+        if isinstance(pos, dict):
+            return float(pos["x"]), float(pos["z"])
+        return float(pos[0]), float(pos[2])
+
+    def _receptacle_salience(self, rec: Dict[str, Any]) -> float:
+        """Rough visual prominence from AABB volume (larger = more salient decoy)."""
+        box = rec.get("axisAlignedBoundingBox") or {}
+        size = box.get("size")
+        if not size:
+            return 0.0
+        if isinstance(size, dict):
+            return abs(float(size.get("x", 0))) * abs(float(size.get("y", 0))) * abs(
+                float(size.get("z", 0))
+            )
+        return abs(float(size[0])) * abs(float(size[1])) * abs(float(size[2]))
+
     def _restore_object_pose(self, object_id: str, position, rotation=None) -> bool:
         """Put object back after a rejected (still-visible) relocation."""
         if isinstance(position, (tuple, list)):
-            position = {"x": float(position[0]), "y": float(position[1]), "z": float(position[2])}
+            position = {
+                "x": float(position[0]),
+                "y": float(position[1]),
+                "z": float(position[2]),
+            }
         kwargs = dict(
             action="PlaceObjectAtPoint",
             objectId=object_id,
@@ -407,7 +504,11 @@ class RoomVisitTask(AbstractSPOCTask):
         )
         if rotation is not None:
             if isinstance(rotation, (tuple, list)):
-                rotation = {"x": float(rotation[0]), "y": float(rotation[1]), "z": float(rotation[2])}
+                rotation = {
+                    "x": float(rotation[0]),
+                    "y": float(rotation[1]),
+                    "z": float(rotation[2]),
+                }
             kwargs["rotation"] = rotation
         event = self.controller.controller.step(**kwargs)
         return bool(event.metadata.get("lastActionSuccess", False))
@@ -423,6 +524,80 @@ class RoomVisitTask(AbstractSPOCTask):
             x1, z1 = p1[0], p1[2]
         return float(np.hypot(x1 - x0, z1 - z0))
 
+    def _positions_close(self, p0, p1, tol: float = 0.2) -> bool:
+        """True if world positions agree within ``tol`` meters (L2)."""
+        if p0 is None or p1 is None:
+            return False
+
+        def _xyz(p):
+            if isinstance(p, dict):
+                return float(p["x"]), float(p["y"]), float(p["z"])
+            return float(p[0]), float(p[1]), float(p[2])
+
+        a, b = _xyz(p0), _xyz(p1)
+        return float(np.linalg.norm(np.array(a) - np.array(b))) <= tol
+
+    def _kinematic_place_on_receptacle(
+        self,
+        object_id: str,
+        receptacle_id: str,
+        ref_pos,
+    ):
+        """``PlaceObjectAtPoint`` + ``forceKinematic`` on a receptacle spawn point.
+
+        Same placement mode as the real displace (deterministic kinematic place).
+        Does **not** check visibility or restore. Returns (success, info).
+        """
+        info = {
+            "receptacle_id": receptacle_id,
+            "n_coords": 0,
+            "n_place_attempts": 0,
+            "last_error": None,
+            "spawn_error": None,
+            "placed_pos": None,
+        }
+        try:
+            coords = self.controller.get_locations_on_receptacle(receptacle_id)
+        except Exception as e:
+            info["spawn_error"] = str(e)
+            return False, info
+        if not coords:
+            info["spawn_error"] = "empty_spawn_coords"
+            return False, info
+
+        scored = []
+        for pos in coords:
+            d = self._xz_dist(ref_pos, pos)
+            if d >= self.min_displace_distance:
+                scored.append((d, pos))
+        if not scored:
+            # For distractor trials, still allow any spawn if none are far enough
+            scored = [(self._xz_dist(ref_pos, pos), pos) for pos in coords]
+        random.shuffle(scored)
+        scored.sort(key=lambda t: -t[0])
+        info["n_coords"] = len(scored)
+
+        for _, pos in scored[: self.max_place_coords]:
+            info["n_place_attempts"] += 1
+            event = self.controller.controller.step(
+                action="PlaceObjectAtPoint",
+                objectId=object_id,
+                position=pos,
+                forceKinematic=True,
+            )
+            if not event.metadata.get("lastActionSuccess", False):
+                err = event.metadata.get("errorMessage") or event.metadata.get(
+                    "lastAction"
+                )
+                info["last_error"] = (
+                    str(err) if err is not None else "PlaceObjectAtPoint_failed"
+                )
+                continue
+            info["placed_pos"] = pos
+            return True, info
+
+        return False, info
+
     def _try_hidden_place_on_receptacle(
         self,
         object_id: str,
@@ -430,10 +605,10 @@ class RoomVisitTask(AbstractSPOCTask):
         from_pos,
         from_rotation=None,
     ):
-        """Place object on receptacle only if the new pose stays ``visible=False``.
+        """Place object on receptacle only if the new pose stays out of the nav image.
 
-        Uses THOR ``visible`` (visibilityDistance), not instance_detections2D.
-        If a candidate pose becomes visible, undo and try another.
+        After a successful kinematic place, re-render synthesis and undo if the
+        object still has mask pixels in the agent camera.
         Returns (success, info).
         """
         info = {
@@ -454,7 +629,6 @@ class RoomVisitTask(AbstractSPOCTask):
             info["spawn_error"] = "empty_spawn_coords"
             return False, info
 
-        # Prefer points far enough from the original pose (e.g. other side of table)
         scored = []
         for pos in coords:
             d = self._xz_dist(from_pos, pos)
@@ -464,7 +638,7 @@ class RoomVisitTask(AbstractSPOCTask):
             info["spawn_error"] = "no_far_enough_spawn_coords"
             return False, info
         random.shuffle(scored)
-        scored.sort(key=lambda t: -t[0])  # try farthest first
+        scored.sort(key=lambda t: -t[0])
         info["n_coords"] = len(scored)
 
         for _, pos in scored[: self.max_place_coords]:
@@ -476,15 +650,18 @@ class RoomVisitTask(AbstractSPOCTask):
                 forceKinematic=True,
             )
             if not event.metadata.get("lastActionSuccess", False):
-                err = event.metadata.get("errorMessage") or event.metadata.get("lastAction")
-                info["last_error"] = str(err) if err is not None else "PlaceObjectAtPoint_failed"
+                err = event.metadata.get("errorMessage") or event.metadata.get(
+                    "lastAction"
+                )
+                info["last_error"] = (
+                    str(err) if err is not None else "PlaceObjectAtPoint_failed"
+                )
                 continue
 
-            if self._object_is_visible(object_id):
-                # Still within visibilityDistance of the agent — reject & undo
+            if self._object_in_nav_image(object_id):
                 info["n_undone_visible"] += 1
                 self._restore_object_pose(object_id, from_pos, from_rotation)
-                info["last_error"] = "placed_but_visible_undone"
+                info["last_error"] = "placed_but_in_image_undone"
                 continue
 
             info["placed_pos"] = pos
@@ -492,13 +669,584 @@ class RoomVisitTask(AbstractSPOCTask):
 
         return False, info
 
-    def maybe_displace_hidden_objects(self) -> List[Dict[str, Any]]:
-        """Move previously seen pickupables only while THOR ``visible`` is False.
+    def _trial_place_readback(
+        self,
+        object_id: str,
+        receptacle_id: str,
+        ref_pos,
+        restore_pos,
+        restore_rot=None,
+    ):
+        """Kinematic trial place for a distractor; restore ``restore_pos`` after.
 
-        Seen = ``visible=True`` at least once; displace after ≥2 steps with
-        ``visible=False``, and only keep the move if still not visible after place.
+        Returns (ok, resolved_pos_rounded_or_None, receptacle_id_or_None).
+        """
+        ok, place_info = self._kinematic_place_on_receptacle(
+            object_id, receptacle_id, ref_pos
+        )
+        if not ok:
+            self._restore_object_pose(object_id, restore_pos, restore_rot)
+            return False, None, None
+        try:
+            obj = self.controller.get_object(object_id, include_receptacle_info=True)
+            resolved = self.collector.round_number(obj["position"], 2)
+            parents = obj.get("parentReceptacles") or []
+            parent = parents[0] if parents else receptacle_id
+        except Exception:
+            resolved = self.collector.round_number(
+                place_info.get("placed_pos") or restore_pos, 2
+            )
+            parent = receptacle_id
+        self._restore_object_pose(object_id, restore_pos, restore_rot)
+        return True, resolved, parent
+
+    def _pick_distractor_receptacles(
+        self,
+        receptacles: List[Dict[str, Any]],
+        chosen_receptacle_id: str,
+        chosen_pos,
+    ) -> Dict[str, Optional[Dict[str, Any]]]:
+        """Select nearby + salient-far receptacles (Floor already excluded from pool)."""
+        chosen_center = None
+        for rec in receptacles:
+            if rec["objectId"] == chosen_receptacle_id:
+                chosen_center = self._receptacle_center_xz(rec)
+                break
+        if chosen_center is None and chosen_pos is not None:
+            if isinstance(chosen_pos, dict):
+                chosen_center = (float(chosen_pos["x"]), float(chosen_pos["z"]))
+            else:
+                chosen_center = (float(chosen_pos[0]), float(chosen_pos[2]))
+
+        nearby_candidates = []
+        far_candidates = []
+        for rec in receptacles:
+            rid = rec["objectId"]
+            if rid == chosen_receptacle_id:
+                continue
+            if not self._receptacle_is_usable(rec):
+                continue
+            center = self._receptacle_center_xz(rec)
+            if center is None or chosen_center is None:
+                continue
+            d = float(np.hypot(center[0] - chosen_center[0], center[1] - chosen_center[1]))
+            if d <= NEARBY_RECEPTACLE_XZ_M:
+                nearby_candidates.append((d, rec))
+            else:
+                far_candidates.append((self._receptacle_salience(rec), d, rec))
+
+        nearby_candidates.sort(key=lambda t: t[0])
+        far_candidates.sort(key=lambda t: (-t[0], -t[1]))
+
+        return {
+            "nearby_receptacle": nearby_candidates[0][1] if nearby_candidates else None,
+            "salient_decoy_location": far_candidates[0][2] if far_candidates else None,
+        }
+
+    def _kinematic_place_at_pose(self, object_id: str, position, rotation=None):
+        """Place at an exact pose (used for object swap). Returns (ok, error_or_None)."""
+        if isinstance(position, (tuple, list)):
+            position = {
+                "x": float(position[0]),
+                "y": float(position[1]),
+                "z": float(position[2]),
+            }
+        kwargs = dict(
+            action="PlaceObjectAtPoint",
+            objectId=object_id,
+            position=position,
+            forceKinematic=True,
+        )
+        if rotation is not None:
+            if isinstance(rotation, (tuple, list)):
+                rotation = {
+                    "x": float(rotation[0]),
+                    "y": float(rotation[1]),
+                    "z": float(rotation[2]),
+                }
+            kwargs["rotation"] = rotation
+        event = self.controller.controller.step(**kwargs)
+        ok = bool(event.metadata.get("lastActionSuccess", False))
+        err = None
+        if not ok:
+            err = event.metadata.get("errorMessage") or event.metadata.get("lastAction")
+            err = str(err) if err is not None else "PlaceObjectAtPoint_failed"
+        return ok, err
+
+    def _xyz_dict(self, p) -> Dict[str, float]:
+        if isinstance(p, dict):
+            return {"x": float(p["x"]), "y": float(p["y"]), "z": float(p["z"])}
+        return {"x": float(p[0]), "y": float(p[1]), "z": float(p[2])}
+
+    def _floor_ids_in_room(self, room_id: str) -> List[str]:
+        """Floor receptacle ids in ``room_id`` (swap park only — not destination sampling)."""
+        ids = []
+        with self.controller.include_object_metadata_context():
+            for o in self.controller.controller.last_event.metadata["objects"]:
+                oid = o.get("objectId")
+                is_floor = o.get("objectType") == "Floor" or (
+                    oid is not None and str(oid).startswith("Floor|")
+                )
+                if not is_floor:
+                    continue
+                try:
+                    r_id, _ = self.controller.get_objects_room_id_and_type(oid)
+                except Exception:
+                    continue
+                if r_id == room_id:
+                    ids.append(oid)
+        return ids
+
+    def _floor_park_poses(self, pos_a, pos_b, room_id: str, max_n: int = 6) -> List[Dict[str, float]]:
+        """Floor spawn points near the A–B midpoint (temporary hold, not a persisted destination)."""
+        ax, az = self._xyz_dict(pos_a)["x"], self._xyz_dict(pos_a)["z"]
+        bx, bz = self._xyz_dict(pos_b)["x"], self._xyz_dict(pos_b)["z"]
+        mx, mz = (ax + bx) / 2.0, (az + bz) / 2.0
+        scored = []
+        for fid in self._floor_ids_in_room(room_id):
+            try:
+                coords = self.controller.get_locations_on_receptacle(fid)
+            except Exception:
+                continue
+            if not coords:
+                continue
+            for pos in coords:
+                p = self._xyz_dict(pos)
+                d = float(np.hypot(p["x"] - mx, p["z"] - mz))
+                scored.append((d, p))
+        scored.sort(key=lambda t: t[0])
+        return [p for _, p in scored[:max_n]]
+
+    def _object_between_xz(
+        self, pos_a, pos_b, skip_ids: Set[str], corridor_m: float = 0.4
+    ) -> bool:
+        """True if some other object sits on the xz segment between A and B."""
+        a = self._xyz_dict(pos_a)
+        b = self._xyz_dict(pos_b)
+        abx, abz = b["x"] - a["x"], b["z"] - a["z"]
+        ab2 = abx * abx + abz * abz
+        if ab2 < 1e-6:
+            return False
+        with self.controller.include_object_metadata_context():
+            objects = list(self.controller.controller.last_event.metadata["objects"])
+        for o in objects:
+            oid = o.get("objectId")
+            if oid in skip_ids:
+                continue
+            if o.get("objectType") in ("Floor", "Wall", "Ceiling", "Room"):
+                continue
+            pos = o.get("position")
+            if not pos:
+                continue
+            p = self._xyz_dict(pos)
+            t = ((p["x"] - a["x"]) * abx + (p["z"] - a["z"]) * abz) / ab2
+            if t <= 0.08 or t >= 0.92:
+                continue
+            cx = a["x"] + t * abx
+            cz = a["z"] + t * abz
+            if float(np.hypot(p["x"] - cx, p["z"] - cz)) <= corridor_m:
+                return True
+        return False
+
+    def _swap_temp_park_poses(
+        self, pos_a, pos_b, room_id: str, skip_ids: Set[str]
+    ) -> List[Dict[str, float]]:
+        """Holds so A can leave its pose before B moves in.
+
+        Mid-air points plus **Floor** spawn coords. Floor is tried first when another
+        object lies between A and B (mid-air would collide with it).
+        """
+        a = self._xyz_dict(pos_a)
+        b = self._xyz_dict(pos_b)
+        mid_y = max(a["y"], b["y"]) + 0.5
+        midair = [
+            {"x": (a["x"] + b["x"]) / 2.0, "y": mid_y, "z": (a["z"] + b["z"]) / 2.0},
+            {"x": a["x"], "y": a["y"] + 0.5, "z": a["z"]},
+            {"x": b["x"], "y": b["y"] + 0.5, "z": b["z"]},
+            {"x": a["x"] + 0.35, "y": mid_y, "z": a["z"] + 0.35},
+            {"x": b["x"] - 0.35, "y": mid_y, "z": b["z"] - 0.35},
+        ]
+        floor_poses = self._floor_park_poses(pos_a, pos_b, room_id)
+        if self._object_between_xz(pos_a, pos_b, skip_ids):
+            return floor_poses + midair
+        return midair + floor_poses
+
+    def _pick_swap_partner(
+        self,
+        primary_oid: str,
+        primary_type: Optional[str],
+        room_id: str,
+        in_image_ids: Set[str],
+    ) -> Optional[str]:
+        """Another eligible hidden pickupable of a different type in the same room."""
+        remaining = self.collector.max_displacements - len(
+            self.collector.displaced_object_ids
+        )
+        if remaining < 2:
+            return None
+        for oid in self.collector.eligible_for_displacement():
+            if oid == primary_oid:
+                continue
+            if oid in in_image_ids:
+                continue
+            track = self.collector.tracked_objects.get(oid) or {}
+            other_type = track.get("obj_type")
+            if primary_type and other_type and other_type == primary_type:
+                continue
+            try:
+                other_room, _ = self.controller.get_objects_room_id_and_type(oid)
+            except Exception:
+                continue
+            if other_room != room_id:
+                continue
+            return oid
+        return None
+
+    def _candidate_rows_after_place(
+        self,
+        object_id: str,
+        from_pos,
+        to_receptacle,
+        to_pos_rounded,
+        resolved_pos,
+        after_rot,
+        receptacles: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Chosen + trial-teleport distractor rows for one persisted move."""
+        rows = [
+            {
+                "event_id": None,
+                "obj_id": object_id,
+                "at_timestep": self.collector.timestep,
+                "candidate_role": "chosen",
+                "candidate_receptacle": to_receptacle,
+                "candidate_pos": to_pos_rounded,
+                "is_persisted": True,
+            }
+        ]
+        distractors = self._pick_distractor_receptacles(
+            receptacles, to_receptacle, resolved_pos
+        )
+        for role, rec in distractors.items():
+            if rec is None:
+                continue
+            rid = rec["objectId"]
+            ok_trial, trial_pos, trial_parent = self._trial_place_readback(
+                object_id,
+                rid,
+                from_pos,
+                restore_pos=resolved_pos,
+                restore_rot=after_rot,
+            )
+            if not ok_trial or trial_pos is None:
+                continue
+            rows.append(
+                {
+                    "event_id": None,
+                    "obj_id": object_id,
+                    "at_timestep": self.collector.timestep,
+                    "candidate_role": role,
+                    "candidate_receptacle": trial_parent or rid,
+                    "candidate_pos": trial_pos,
+                    "is_persisted": False,
+                }
+            )
+        return rows
+
+    def _try_hidden_object_swap(
+        self,
+        oid_a: str,
+        obj_a: Dict[str, Any],
+        room_id: str,
+        in_image_ids: Set[str],
+        receptacles: List[Dict[str, Any]],
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Fallback: swap two different-type hidden pickupables (both out of image).
+
+        Returns two linked event dicts on success, else None (scene restored).
+        """
+        type_a = obj_a.get("objectType")
+        oid_b = self._pick_swap_partner(oid_a, type_a, room_id, in_image_ids)
+        if oid_b is None:
+            self.collector.log_displacement_debug(
+                {
+                    "obj_id": oid_a,
+                    "status": "fail",
+                    "stage": "swap_no_partner",
+                    "detail": "no different-type hidden partner in room",
+                    "room_id": room_id,
+                }
+            )
+            return None
+
+        try:
+            obj_b = self.controller.get_object(oid_b, include_receptacle_info=True)
+        except Exception as e:
+            self.collector.log_displacement_debug(
+                {
+                    "obj_id": oid_a,
+                    "status": "fail",
+                    "stage": "swap_get_partner",
+                    "detail": str(e),
+                    "room_id": room_id,
+                    "to_receptacle": oid_b,
+                }
+            )
+            return None
+
+        if oid_b in in_image_ids:
+            self.collector.log_displacement_debug(
+                {
+                    "obj_id": oid_a,
+                    "status": "fail",
+                    "stage": "swap_partner_in_image",
+                    "detail": f"partner {oid_b} still in nav image",
+                    "room_id": room_id,
+                }
+            )
+            return None
+
+        parents_a = obj_a.get("parentReceptacles") or []
+        parents_b = obj_b.get("parentReceptacles") or []
+        rec_a = parents_a[0] if parents_a else None
+        rec_b = parents_b[0] if parents_b else None
+        pos_a = obj_a["position"]
+        pos_b = obj_b["position"]
+        rot_a = obj_a.get("rotation")
+        rot_b = obj_b.get("rotation")
+        from_a = self.collector.round_number(pos_a, 2)
+        from_b = self.collector.round_number(pos_b, 2)
+        vis_a = bool(obj_a.get("visible", False))
+        vis_b = bool(obj_b.get("visible", False))
+
+        # Three-step swap: park A (mid-air or Floor), move B into A's pose, move A into B's pose.
+        # Floor is preferred when another object sits between A and B.
+        parked = False
+        park_err = None
+        park_poses = self._swap_temp_park_poses(
+            pos_a, pos_b, room_id, skip_ids={oid_a, oid_b}
+        )
+        for temp in park_poses:
+            ok, park_err = self._kinematic_place_at_pose(oid_a, temp)
+            if ok:
+                parked = True
+                break
+        if not parked:
+            self.collector.log_displacement_debug(
+                {
+                    "obj_id": oid_a,
+                    "status": "fail",
+                    "stage": "swap_park_a",
+                    "detail": f"failed parking {oid_a} before swap; err={park_err}",
+                    "room_id": room_id,
+                    "from_receptacle": rec_a,
+                    "to_receptacle": rec_b,
+                    "last_error": park_err or "swap_park_a_failed",
+                }
+            )
+            return None
+
+        ok_b, err_b = self._kinematic_place_at_pose(oid_b, pos_a, rot_a)
+        if not ok_b:
+            self._restore_object_pose(oid_a, pos_a, rot_a)
+            self.collector.log_displacement_debug(
+                {
+                    "obj_id": oid_a,
+                    "status": "fail",
+                    "stage": "swap_place_b",
+                    "detail": f"failed placing {oid_b} at {oid_a} pose; err={err_b}",
+                    "room_id": room_id,
+                    "from_receptacle": rec_a,
+                    "to_receptacle": rec_b,
+                    "last_error": err_b or "swap_place_b_failed",
+                }
+            )
+            return None
+
+        ok_a, err_a = self._kinematic_place_at_pose(oid_a, pos_b, rot_b)
+        if not ok_a:
+            self._restore_object_pose(oid_a, pos_a, rot_a)
+            self._restore_object_pose(oid_b, pos_b, rot_b)
+            self.collector.log_displacement_debug(
+                {
+                    "obj_id": oid_a,
+                    "status": "fail",
+                    "stage": "swap_place_a",
+                    "detail": f"failed placing {oid_a} at partner pose; err={err_a}",
+                    "room_id": room_id,
+                    "from_receptacle": rec_a,
+                    "to_receptacle": rec_b,
+                    "last_error": err_a or "swap_place_a_failed",
+                }
+            )
+            return None
+
+        if self._object_in_nav_image(oid_a) or self._object_in_nav_image(oid_b):
+            self._restore_object_pose(oid_a, pos_a, rot_a)
+            self._restore_object_pose(oid_b, pos_b, rot_b)
+            self.collector.log_displacement_debug(
+                {
+                    "obj_id": oid_a,
+                    "status": "fail",
+                    "stage": "swap_in_image_after",
+                    "detail": f"undone swap {oid_a}<->{oid_b}; still in nav image",
+                    "room_id": room_id,
+                    "last_error": "swap_still_in_image",
+                }
+            )
+            return None
+
+        try:
+            after_a = self.controller.get_object(oid_a, include_receptacle_info=True)
+            after_b = self.controller.get_object(oid_b, include_receptacle_info=True)
+        except Exception as e:
+            self._restore_object_pose(oid_a, pos_a, rot_a)
+            self._restore_object_pose(oid_b, pos_b, rot_b)
+            self.collector.log_displacement_debug(
+                {
+                    "obj_id": oid_a,
+                    "status": "fail",
+                    "stage": "swap_get_after",
+                    "detail": str(e),
+                    "room_id": room_id,
+                }
+            )
+            return None
+
+        to_a = self.collector.round_number(after_a["position"], 2)
+        to_b = self.collector.round_number(after_b["position"], 2)
+        if not self._positions_close(after_a["position"], pos_b, tol=0.35):
+            self._restore_object_pose(oid_a, pos_a, rot_a)
+            self._restore_object_pose(oid_b, pos_b, rot_b)
+            self.collector.log_displacement_debug(
+                {
+                    "obj_id": oid_a,
+                    "status": "fail",
+                    "stage": "swap_state_mismatch",
+                    "detail": f"{oid_a} not at partner pose after swap",
+                    "room_id": room_id,
+                    "last_error": "swap_position_mismatch",
+                }
+            )
+            return None
+        if not self._positions_close(after_b["position"], pos_a, tol=0.35):
+            self._restore_object_pose(oid_a, pos_a, rot_a)
+            self._restore_object_pose(oid_b, pos_b, rot_b)
+            self.collector.log_displacement_debug(
+                {
+                    "obj_id": oid_a,
+                    "status": "fail",
+                    "stage": "swap_state_mismatch",
+                    "detail": f"{oid_b} not at partner pose after swap",
+                    "room_id": room_id,
+                    "last_error": "swap_position_mismatch",
+                }
+            )
+            return None
+
+        parents_after_a = after_a.get("parentReceptacles") or []
+        parents_after_b = after_b.get("parentReceptacles") or []
+        to_rec_a = parents_after_a[0] if parents_after_a else rec_b
+        to_rec_b = parents_after_b[0] if parents_after_b else rec_a
+
+        event_id = f"disp_{len(self.collector.data_displacement_events)}"
+        t = self.collector.timestep
+
+        cand_a = self._candidate_rows_after_place(
+            oid_a,
+            from_pos=pos_a,
+            to_receptacle=to_rec_a,
+            to_pos_rounded=to_a,
+            resolved_pos=after_a["position"],
+            after_rot=after_a.get("rotation"),
+            receptacles=receptacles,
+        )
+        cand_b = self._candidate_rows_after_place(
+            oid_b,
+            from_pos=pos_b,
+            to_receptacle=to_rec_b,
+            to_pos_rounded=to_b,
+            resolved_pos=after_b["position"],
+            after_rot=after_b.get("rotation"),
+            receptacles=receptacles,
+        )
+
+        event_a = {
+            "event_id": event_id,
+            "obj_id": oid_a,
+            "at_timestep": t,
+            "action": "PlaceObjectAtPoint",
+            "from_receptacle": rec_a,
+            "to_receptacle": to_rec_a,
+            "from_pos": from_a,
+            "to_pos": to_a,
+            "hidden_during": True,
+            "visible_just_before": vis_a,
+            "visible_just_after": bool(after_a.get("visible", False)),
+            "in_fov_just_before": oid_a in in_image_ids,
+            "in_fov_just_after": False,
+            "moved_via": "swap",
+            "swap_partner_id": oid_b,
+            "notes": "object_swap",
+        }
+        event_b = {
+            "event_id": event_id,
+            "obj_id": oid_b,
+            "at_timestep": t,
+            "action": "PlaceObjectAtPoint",
+            "from_receptacle": rec_b,
+            "to_receptacle": to_rec_b,
+            "from_pos": from_b,
+            "to_pos": to_b,
+            "hidden_during": True,
+            "visible_just_before": vis_b,
+            "visible_just_after": bool(after_b.get("visible", False)),
+            "in_fov_just_before": oid_b in in_image_ids,
+            "in_fov_just_after": False,
+            "moved_via": "swap",
+            "swap_partner_id": oid_a,
+            "notes": "object_swap",
+        }
+
+        self.collector.log_displacement_event(event_a)
+        self.collector.log_displacement_event(event_b)
+        for row in cand_a + cand_b:
+            row["event_id"] = event_id
+            self.collector.log_displacement_candidate(row)
+        self.collector.log_displacement_debug(
+            {
+                "obj_id": oid_a,
+                "status": "ok",
+                "stage": "object_swap",
+                "detail": (
+                    f"swapped with {oid_b} "
+                    f"n_candidates={len(cand_a) + len(cand_b)}"
+                ),
+                "room_id": room_id,
+                "from_receptacle": rec_a,
+                "to_receptacle": to_rec_a,
+                "last_error": None,
+            }
+        )
+        return [event_a, event_b]
+
+
+    def maybe_displace_hidden_objects(
+        self, in_image_ids: Optional[Set[str]] = None
+    ) -> List[Dict[str, Any]]:
+        """Move tracked pickupables only while they are absent from the nav image.
+
+        Seen = mask pixels in the agent camera at least once; displace after ≥2
+        synthesis steps without mask pixels; keep the move only if still not in
+        the image after place. If receptacle place fails, try an **object swap**
+        with a different-type hidden partner (both out of image).
+
+        ``in_image_ids`` must be the pickupable set from the current nav frame
+        (synthesis step). If ``None``, skip displacement (cannot verify image FOV).
         """
         events = []
+        if in_image_ids is None:
+            return events
         if self._displacements_this_step >= self.max_displacements_per_step:
             return events
         if len(self.collector.displaced_object_ids) >= self.collector.max_displacements:
@@ -515,14 +1263,14 @@ class RoomVisitTask(AbstractSPOCTask):
             if self._displacements_this_step >= self.max_displacements_per_step:
                 break
 
-            # Hard requirement: not visible before moving
-            if self._object_is_visible(oid):
+            # Hard requirement: not in the agent image before moving
+            if oid in in_image_ids:
                 self.collector.log_displacement_debug(
                     {
                         "obj_id": oid,
                         "status": "fail",
-                        "stage": "still_visible",
-                        "detail": "refusing displace while object visible=True",
+                        "stage": "still_in_image",
+                        "detail": "refusing displace while object has nav mask pixels",
                     }
                 )
                 continue
@@ -568,6 +1316,7 @@ class RoomVisitTask(AbstractSPOCTask):
             from_pos_rounded = self.collector.round_number(from_pos, 2)
             from_rot = obj_before.get("rotation")
             visible_before = bool(obj_before.get("visible", False))
+            in_image_before = oid in in_image_ids
 
             receptacles = list(self._receptacles_in_room(room_id))
             # Prefer current receptacle first (cup left→right on same table), then others
@@ -591,7 +1340,7 @@ class RoomVisitTask(AbstractSPOCTask):
                 if n_tried >= self.max_receptacles_to_try:
                     break
                 rid = rec["objectId"]
-                if rec.get("openable", False) and not rec.get("isOpen", False):
+                if not self._receptacle_is_usable(rec):
                     n_closed += 1
                     continue
                 n_tried += 1
@@ -612,6 +1361,7 @@ class RoomVisitTask(AbstractSPOCTask):
                     break
 
             if not placed:
+                self.collector.note_place_failure(oid)
                 self.collector.log_displacement_debug(
                     {
                         "obj_id": oid,
@@ -619,7 +1369,7 @@ class RoomVisitTask(AbstractSPOCTask):
                         "stage": "place_failed",
                         "detail": (
                             f"no hidden PlaceObjectAtPoint; "
-                            f"last_error={last_error}"
+                            f"last_error={last_error}; trying object_swap"
                         ),
                         "room_id": room_id,
                         "from_receptacle": from_receptacle,
@@ -633,6 +1383,12 @@ class RoomVisitTask(AbstractSPOCTask):
                         "last_error": last_error,
                     }
                 )
+                swap_events = self._try_hidden_object_swap(
+                    oid, obj_before, room_id, in_image_ids, receptacles
+                )
+                if swap_events:
+                    events.extend(swap_events)
+                    self._displacements_this_step += 1
                 continue
 
             try:
@@ -652,30 +1408,112 @@ class RoomVisitTask(AbstractSPOCTask):
                 )
                 continue
 
-            visible_after = bool(obj_after.get("visible", False))
-            if visible_after:
+            in_image_after = self._object_in_nav_image(oid)
+            if in_image_after:
                 self._restore_object_pose(oid, from_pos, from_rot)
+                self.collector.note_place_failure(oid)
                 self.collector.log_displacement_debug(
                     {
                         "obj_id": oid,
                         "status": "fail",
-                        "stage": "visible_after_final_check",
-                        "detail": "undone; object still visible=True",
+                        "stage": "in_image_after_final_check",
+                        "detail": "undone; object still has nav mask pixels",
                         "room_id": room_id,
                         "from_receptacle": from_receptacle,
                         "to_receptacle": to_receptacle,
                         "n_undone_visible": n_undone_visible + 1,
-                        "last_error": "final_visible_check_failed",
+                        "last_error": "final_in_image_check_failed",
                     }
                 )
                 continue
 
-            to_pos_rounded = self.collector.round_number(
-                to_pos if to_pos is not None else obj_after["position"], 2
-            )
+            visible_after = bool(obj_after.get("visible", False))
+            resolved_pos = obj_after["position"]
+            to_pos_rounded = self.collector.round_number(resolved_pos, 2)
             parents_after = obj_after.get("parentReceptacles") or []
             if to_receptacle is None and parents_after:
                 to_receptacle = parents_after[0]
+
+            # Validate engine state matches the intended place before persisting
+            expected_pos = to_pos if to_pos is not None else resolved_pos
+            pos_ok = self._positions_close(resolved_pos, expected_pos, tol=0.25)
+            parent_ok = True
+            if to_receptacle is not None and parents_after:
+                parent_ok = to_receptacle in parents_after or parents_after[0] == to_receptacle
+            # Reject Floor dropouts even when xz matches a counter spawn
+            if parents_after and any(
+                str(p).startswith("Floor|") or p == "Floor" for p in parents_after
+            ):
+                parent_ok = False
+            if not pos_ok or not parent_ok:
+                self._restore_object_pose(oid, from_pos, from_rot)
+                self.collector.note_place_failure(oid)
+                mismatch = []
+                if not pos_ok:
+                    mismatch.append(
+                        f"pos expected={self.collector.round_number(expected_pos, 2)} "
+                        f"got={to_pos_rounded}"
+                    )
+                if not parent_ok:
+                    mismatch.append(
+                        f"parent expected={to_receptacle} got={parents_after}"
+                    )
+                self.collector.log_displacement_debug(
+                    {
+                        "obj_id": oid,
+                        "status": "fail",
+                        "stage": "state_mismatch",
+                        "detail": "readback mismatch; " + "; ".join(mismatch),
+                        "room_id": room_id,
+                        "from_receptacle": from_receptacle,
+                        "to_receptacle": to_receptacle,
+                        "n_place_fail": n_place_fail + 1,
+                        "last_error": "object_state_mismatch",
+                    }
+                )
+                continue
+
+            after_rot = obj_after.get("rotation")
+
+            # Trial-teleport distractors (same PlaceObjectAtPoint mode); restore to real pose
+            distractors = self._pick_distractor_receptacles(
+                receptacles, to_receptacle, resolved_pos
+            )
+            candidate_rows = [
+                {
+                    "event_id": None,  # filled after event_id assigned
+                    "obj_id": oid,
+                    "at_timestep": self.collector.timestep,
+                    "candidate_role": "chosen",
+                    "candidate_receptacle": to_receptacle,
+                    "candidate_pos": to_pos_rounded,
+                    "is_persisted": True,
+                }
+            ]
+            for role, rec in distractors.items():
+                if rec is None:
+                    continue
+                rid = rec["objectId"]
+                ok_trial, trial_pos, trial_parent = self._trial_place_readback(
+                    oid,
+                    rid,
+                    from_pos,
+                    restore_pos=resolved_pos,
+                    restore_rot=after_rot,
+                )
+                if not ok_trial or trial_pos is None:
+                    continue
+                candidate_rows.append(
+                    {
+                        "event_id": None,
+                        "obj_id": oid,
+                        "at_timestep": self.collector.timestep,
+                        "candidate_role": role,
+                        "candidate_receptacle": trial_parent or rid,
+                        "candidate_pos": trial_pos,
+                        "is_persisted": False,
+                    }
+                )
 
             same_rec = from_receptacle is not None and from_receptacle == to_receptacle
             notes = (
@@ -684,8 +1522,9 @@ class RoomVisitTask(AbstractSPOCTask):
                 else "other_receptacle_hidden_place"
             )
 
+            event_id = f"disp_{len(self.collector.data_displacement_events)}"
             event = {
-                "event_id": f"disp_{len(self.collector.data_displacement_events)}",
+                "event_id": event_id,
                 "obj_id": oid,
                 "at_timestep": self.collector.timestep,
                 "action": "PlaceObjectAtPoint",
@@ -695,20 +1534,27 @@ class RoomVisitTask(AbstractSPOCTask):
                 "to_pos": to_pos_rounded,
                 "hidden_during": True,
                 "visible_just_before": visible_before,
-                "visible_just_after": False,
-                # Schema compat: mirrors THOR visible (not detections2D)
-                "in_fov_just_before": visible_before,
+                "visible_just_after": visible_after,
+                # Schema: image FOV (nav mask), not THOR metadata visible
+                "in_fov_just_before": in_image_before,
                 "in_fov_just_after": False,
                 "moved_via": "direct",
+                "swap_partner_id": None,
                 "notes": notes,
             }
             self.collector.log_displacement_event(event)
+            for row in candidate_rows:
+                row["event_id"] = event_id
+                self.collector.log_displacement_candidate(row)
             self.collector.log_displacement_debug(
                 {
                     "obj_id": oid,
                     "status": "ok",
                     "stage": "placed_hidden",
-                    "detail": f"notes={notes} n_undone_visible={n_undone_visible}",
+                    "detail": (
+                        f"notes={notes} n_undone_visible={n_undone_visible} "
+                        f"parent_ok={parent_ok} n_candidates={len(candidate_rows)}"
+                    ),
                     "room_id": room_id,
                     "from_receptacle": from_receptacle,
                     "to_receptacle": to_receptacle,
@@ -728,8 +1574,9 @@ class RoomVisitTask(AbstractSPOCTask):
     def _build_object_state_rows(self, detections=None) -> List[Dict[str, Any]]:
         """Per-timestep true state for all tracked objects, including hidden.
 
-        ``in_camera_fov`` mirrors THOR ``visible`` (visibilityDistance), not
-        instance_detections2D. Optional ``detections`` is ignored (kept for call compat).
+        ``visible`` is THOR metadata; ``in_camera_fov`` is nav-image presence
+        (mask pixels), updated on synthesis strides and used for displacement.
+        Optional ``detections`` is ignored (kept for call compat).
         """
         tracked_ids = set(self.collector.tracked_objects.keys())
         if not tracked_ids:
@@ -755,11 +1602,12 @@ class RoomVisitTask(AbstractSPOCTask):
                     except Exception:
                         receptacle_open[pid] = None
                 rec_open = receptacle_open[pid]
-            is_visible = bool(obj.get("visible", False))
+            track = self.collector.tracked_objects.get(oid) or {}
+            in_camera_fov = bool(track.get("in_camera_fov", False))
             rows.append(
                 {
                     "obj_meta": obj,
-                    "in_camera_fov": is_visible,
+                    "in_camera_fov": in_camera_fov,
                     "receptacle_is_open": rec_open,
                 }
             )
@@ -871,10 +1719,15 @@ class RoomVisitTask(AbstractSPOCTask):
                             by_id[o["objectId"]] = o
                 objects = list(by_id.values())
 
-                # Every step: THOR ``visible`` tracking + displacement (no detections2D)
-                visible_pickupables = self._gather_visible_pickupable_meta()
-                self.collector.update_visibility_tracking(visible_pickupables)
-                self.maybe_displace_hidden_objects()
+                # Displacement tracking uses nav-image mask pixels (same as images/),
+                # only on synthesis strides. Off-stride: freeze hidden_steps.
+                in_image_pickupables = {}
+                if include_detections:
+                    in_image_pickupables = self._gather_pickupables_in_image(event)
+                    self.collector.update_visibility_tracking(in_image_pickupables)
+                    self.maybe_displace_hidden_objects(
+                        in_image_ids=set(in_image_pickupables.keys())
+                    )
 
                 object_states = self._build_object_state_rows()
 

@@ -71,6 +71,7 @@ class Collector:
         self.data_doors = []
         self.data_object_state = []
         self.data_displacement_events = []
+        self.data_displacement_candidates = []
         self.data_displacement_debug = []  # attempts / failures for diagnosing 0 displacements
         self.data_region_trajectory = []
         self.timestep = 0
@@ -598,6 +599,7 @@ class Collector:
             "in_fov_just_before": [],
             "in_fov_just_after": [],
             "moved_via": [],
+            "swap_partner_id": [],
             "notes": [],
         }
         for entry in self.data_displacement_events:
@@ -615,6 +617,7 @@ class Collector:
             cols["in_fov_just_before"].append(entry["in_fov_just_before"])
             cols["in_fov_just_after"].append(entry["in_fov_just_after"])
             cols["moved_via"].append(entry["moved_via"])
+            cols["swap_partner_id"].append(entry.get("swap_partner_id"))
             cols["notes"].append(entry["notes"])
         return cols
 
@@ -651,20 +654,24 @@ class Collector:
             cols["region_type"].append(entry["region_type"])
         return cols
 
-    def update_visibility_tracking(self, visible_pickupable_meta):
-        """Track pickupables using THOR ``visible`` (not instance_detections2D).
+    def update_visibility_tracking(self, in_image_pickupable_meta):
+        """Track pickupables by **nav-image** presence (detections + mask pixels).
 
-        ``visible_pickupable_meta`` maps objectId → metadata for pickupables with
-        ``visible=True`` this step (within ``visibilityDistance``).
+        ``in_image_pickupable_meta`` maps objectId → metadata for pickupables that
+        appear in the current agent RGB/seg frame (same signal as navigation
+        ``visible-pixels > 0``). Call only on synthesis strides; off-stride callers
+        should skip this method so ``hidden_steps`` is not advanced blindly.
         """
-        visible_ids = set(visible_pickupable_meta.keys())
+        visible_ids = set(in_image_pickupable_meta.keys())
         for oid, track in self.tracked_objects.items():
             if oid in visible_ids:
                 track["last_visible_t"] = self.timestep
                 track["hidden_steps"] = 0
+                track["in_camera_fov"] = True
             else:
                 track["hidden_steps"] += 1
-        for oid, meta in visible_pickupable_meta.items():
+                track["in_camera_fov"] = False
+        for oid, meta in in_image_pickupable_meta.items():
             if oid in self.tracked_objects:
                 continue
             self.tracked_objects[oid] = {
@@ -672,24 +679,44 @@ class Collector:
                 "first_seen_t": self.timestep,
                 "last_visible_t": self.timestep,
                 "hidden_steps": 0,
+                "in_camera_fov": True,
                 "displaced": False,
+                "place_fail_count": 0,
             }
 
-    def candidates_for_displacement(self):
-        """Pickupables seen before (visible once), now not visible for ≥2 steps, not moved."""
-        if len(self.displaced_object_ids) >= self.max_displacements:
-            return []
-        candidates = []
+    def eligible_for_displacement(self):
+        """All pickupables eligible to move (unsorted aside from fail-count priority)."""
+        eligible = []
         for oid, track in self.tracked_objects.items():
             if track["displaced"] or oid in self.displaced_object_ids:
                 continue
             if track["hidden_steps"] < 2:
                 continue
+            if track.get("in_camera_fov"):
+                continue
             if track["first_seen_t"] >= self.timestep:
                 continue
-            candidates.append(oid)
+            eligible.append(oid)
+        eligible.sort(
+            key=lambda oid: (
+                int(self.tracked_objects[oid].get("place_fail_count") or 0),
+                -int(self.tracked_objects[oid].get("hidden_steps") or 0),
+            )
+        )
+        return eligible
+
+    def candidates_for_displacement(self):
+        """Eligible pickupables, capped by remaining displacement budget."""
+        if len(self.displaced_object_ids) >= self.max_displacements:
+            return []
         remaining = self.max_displacements - len(self.displaced_object_ids)
-        return candidates[:remaining]
+        return self.eligible_for_displacement()[:remaining]
+
+    def note_place_failure(self, object_id: str):
+        """Bump fail count so another object is preferred next step."""
+        track = self.tracked_objects.get(object_id)
+        if track is not None:
+            track["place_fail_count"] = int(track.get("place_fail_count") or 0) + 1
 
     def log_object_state_row(self, timestep, obj_meta, in_camera_fov, receptacle_is_open=None):
         parents = obj_meta.get("parentReceptacles") or []
@@ -719,6 +746,38 @@ class Collector:
         self.displaced_object_ids.add(event["obj_id"])
         if event["obj_id"] in self.tracked_objects:
             self.tracked_objects[event["obj_id"]]["displaced"] = True
+
+    def log_displacement_candidate(self, row):
+        """One distractor / chosen destination pose for cm-benchmark options."""
+        self.data_displacement_candidates.append(dict(row))
+
+    def get_dict_displacement_candidates(self):
+        cols = {
+            "event_id": [],
+            "obj-id": [],
+            "at_timestep": [],
+            "candidate_role": [],
+            "candidate_receptacle": [],
+            "candidate_pos-x": [],
+            "candidate_pos-y": [],
+            "candidate_pos-z": [],
+            "is_persisted": [],
+        }
+        for entry in self.data_displacement_candidates:
+            cols["event_id"].append(entry.get("event_id"))
+            cols["obj-id"].append(entry.get("obj_id"))
+            cols["at_timestep"].append(entry.get("at_timestep"))
+            cols["candidate_role"].append(entry.get("candidate_role"))
+            cols["candidate_receptacle"].append(entry.get("candidate_receptacle"))
+            pos = entry.get("candidate_pos")
+            if pos is None:
+                cols["candidate_pos-x"].append(None)
+                cols["candidate_pos-y"].append(None)
+                cols["candidate_pos-z"].append(None)
+            else:
+                self.save_data_by_axis(cols, "candidate_pos", pos)
+            cols["is_persisted"].append(bool(entry.get("is_persisted")))
+        return cols
 
     def log_displacement_debug(self, entry, verbose=False):
         """Record why a displacement attempt succeeded or failed."""
@@ -962,6 +1021,9 @@ class Collector:
         pd.DataFrame(self.get_dict_displacement_events()).to_csv(
             self._csv_path("displacement_events"), index=False
         )
+        pd.DataFrame(self.get_dict_displacement_candidates()).to_csv(
+            self._csv_path("displacement_candidates"), index=False
+        )
 
         if self.world_layout is not None:
             layout = dict(self.world_layout)
@@ -997,6 +1059,7 @@ class Collector:
             "truncated": self._truncated or self.at_capacity,
             "save_reason": reason,
             "num_displacements": len(self.data_displacement_events),
+            "num_displacement_candidates": len(self.data_displacement_candidates),
             "num_tracked_objects": len(self.tracked_objects),
             "displacement_fail_stages": fail_counts,
             "fov_stride": self.fov_stride,
@@ -1017,8 +1080,11 @@ class Collector:
             },
             "visibility_filters": {
                 "note": (
-                    "navigation/objects CSV lists named non-structural FOV objects "
-                    "(drops Wall/Floor and numeric-only ids like '2|4')."
+                    "navigation/objects CSV: named non-structural FOV objects "
+                    "(drops Wall/Floor and numeric-only ids). "
+                    "Displacement / object_state.in_camera_fov: pickupables with "
+                    "nav mask pixels (visible-pixels > 0) on synthesis strides; "
+                    "object_state.visible remains THOR metadata."
                 ),
             },
         }

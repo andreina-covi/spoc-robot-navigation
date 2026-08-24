@@ -62,6 +62,7 @@ Each episode root has **two** sibling folders:
     doors-house_XXXXXX.csv
     object_state-house_XXXXXX.csv
     displacement_events-house_XXXXXX.csv
+    displacement_candidates-house_XXXXXX.csv
     displacement_debug-house_XXXXXX.csv
     passage_state-house_XXXXXX.csv
     region_trajectory-house_XXXXXX.csv
@@ -85,7 +86,7 @@ Each episode root has **two** sibling folders:
 |--------|------------------|
 | `navigation-*.csv` | **Named non-structural** FOV objects with `visible-pixels > 0`, **plus visibility metrics**. Drops Wall/Floor and numeric-only ids (e.g. `2|4`). Post-processing decides keep/drop. |
 | `objects-*.csv` | Catalog of those FOV objects seen at least once (with instance color) |
-| `object_state-*.csv` / displacement | **Pickupable** objects tracked after ``visible=True`` at least once |
+| `object_state-*.csv` / displacement | **Pickupable** objects tracked after nav mask pixels at least once |
 | `current-room` / `region_trajectory` | **Agent–room** membership (do **not** treat Floor/Wall as the room object) |
 
 **Export vs filter (recommended policy):**
@@ -93,6 +94,7 @@ Each episode root has **two** sibling folders:
 | Stage | What is dropped at collection time | Who decides the rest |
 |-------|------------------------------------|----------------------|
 | Navigation / objects CSV | Structural (Wall/Floor/…) + numeric-only ids (`2|4`) + zero mask pixels | Post-processing via metrics |
+| Displacement `to_receptacle` pool | **Floor** and other structural receptacles (never sampled) | N/A |
 
 **Why export-all-with-metrics for nav:** thresholds can be retuned without re-running THOR; different tasks can use different cutoffs.
 
@@ -125,15 +127,36 @@ they were tracked.
 
 **`object_state-*.csv`** (per timestep × tracked pickupable; includes hidden rows):
 
-- `timestep`, `obj-id`, `obj-type`, pose, `visible` (THOR), `in_camera_fov` (mirrors THOR `visible`)
+- `timestep`, `obj-id`, `obj-type`, pose
+- `visible` — THOR metadata (`visibilityDistance` LOS)
+- `in_camera_fov` — **nav image** presence (instance mask pixels > 0 on synthesis
+  strides; same idea as navigation `visible-pixels`). Used for displacement eligibility.
 - `parent_receptacle`, `parent_receptacles`, `is_inside_receptacle`, `receptacle_is_open`
 
-**`displacement_events-*.csv`** (one row per accepted relocate):
+Tracking starts when a **pickupable** first has mask pixels in the agent camera.
+HousePlant / Fridge / counters / windows stay in `navigation` only (not displace candidates).
 
-- `obj-id`, `at_timestep`, `from_receptacle`, `to_receptacle`, `from_pos-*`, `to_pos-*`
-- `hidden_during` (must be `True` for accepted events), FOV flags, `notes`
-  - `same_receptacle_hidden_shift` — same surface, different pose (e.g. counter left→right)
-  - `other_receptacle_hidden_place` — different receptacle in the same room
+**`displacement_events-*.csv`** (one row per accepted relocate; **two rows** share one `event_id` for a swap):
+
+- `event_id`, `obj-id`, `at_timestep`, `from_receptacle`, `to_receptacle`, `from_pos-*`, `to_pos-*`
+- `hidden_during` (must be `True` for accepted events), FOV flags, `moved_via`, `swap_partner_id`, `notes`
+  - `moved_via=direct` — place onto a receptacle spawn
+  - `moved_via=swap` — exchanged poses with `swap_partner_id` (different `objectType`)
+  - `notes`: `same_receptacle_hidden_shift` | `other_receptacle_hidden_place` | `object_swap`
+- A-not-B / original location for QA is **`from_pos-*`** (no extra column)
+
+**`displacement_candidates-*.csv`** (three roles per accepted event when available):
+
+| Column | Meaning |
+|--------|---------|
+| `event_id` | Joins to `displacement_events.event_id` |
+| `obj-id`, `at_timestep` | Same object / step as the event |
+| `candidate_role` | `chosen` \| `nearby_receptacle` \| `salient_decoy_location` |
+| `candidate_receptacle` | Destination surface for that candidate |
+| `candidate_pos-x/y/z` | Engine-resolved position after kinematic place |
+| `is_persisted` | `True` only for `chosen` (real move left in the scene) |
+
+Distractor rows are **trial teleports**: same `PlaceObjectAtPoint` + `forceKinematic` as the real move, position read back, then object restored to the chosen pose. Egocentric direction is **not** computed here (depends on later agent pose / query step).
 
 **`navigation-*.csv`:** agent poses, rooms, and **named** objects with `obj-id` /
 `obj-distance` every step when THOR ``visible=True`` (pickupables **and**
@@ -147,9 +170,6 @@ objects that already appear in ``displacement_events`` (new pose is also in
 `bBox-center-*` / `size-*` are **3D AABB** fields from metadata (not segmentation).
 They should be non-zero whenever THOR provides an AABB (independent of synthesis).
 
-**`displacement_events-*.csv`:** one row per accepted relocate (from/to pose and
-receptacle). Does not replace navigation; pairs with ``displaced=True`` nav rows.
-
 **`world_layout-*.json` / `passage_state` / `region_trajectory`:** survey-oriented layout & room path.
 
 ---
@@ -160,26 +180,63 @@ Implemented in `RoomVisitTask.maybe_displace_hidden_objects` / `_try_hidden_plac
 
 ### Eligibility
 
-1. Object is **pickupable** and was **`visible=True`** at least once (THOR metadata;
-   distance ≤ `visibilityDistance`).
-2. **`visible=False`** for **≥ 2** consecutive steps (`collector.candidates_for_displacement`).
-3. Caps: `max_displacements=5` / episode, `1` displace / step.
+1. Object is **pickupable** and had **nav mask pixels** (`visible-pixels > 0`) at least
+   once — same signal as the RGB frames under `images/`, via `instance_detections2D`.
+2. Absent from the nav image for **≥ 2** consecutive **synthesis** steps
+   (`collector.candidates_for_displacement`; `in_camera_fov=False`).
+3. Caps: `max_displacements=5` / episode, `1` displace **operation** / step
+   (a swap logs two object rows but counts as one step operation; needs ≥2 remaining slots).
+4. Displacement runs only on FOV synthesis strides (when mask/detections exist).
+   Off-stride steps freeze `hidden_steps` (do not treat missing masks as “hidden”).
+5. After repeated `place_failed`, that object’s `place_fail_count` rises so **other**
+   eligible objects are preferred next step.
+
+### Destination sampling
+
+1. Candidate `to_receptacle` pool = non-pickupable receptacles in the agent's room,
+   **excluding Floor / structural** meshes entirely (not sampled, not only discarded after fail).
+2. Prefer spawn points ≥ `min_displace_distance` (0.25 m) from origin; try **same receptacle first**, then others in room.
+3. Closed openables are skipped (`_receptacle_is_usable`).
+
+### Object swap (fallback)
+
+If receptacle place fails for the primary object:
+
+1. Pick another eligible pickupable in the **same room**, **different `objectType`**, also
+   **out of the nav image**, with ≥2 displacement slots remaining.
+2. Kinematically **park A** (mid-air, or **Floor** spawn if another object sits
+   between A and B), move B to A’s pose, then move A to B’s pose
+   (a direct A→B place fails while B still occupies the destination).
+   Floor is only a temporary hold — not a persisted `to_receptacle`.
+3. Require **both** still out of image; validate positions; else restore both.
+4. Persist **two** `displacement_events` rows sharing one `event_id`,
+   `moved_via=swap`, `notes=object_swap`, mutual `swap_partner_id`.
 
 ### Realism rules (avoid “appears from nothing”)
 
-1. Refuse if still **`visible=True`** before place.
+1. Refuse if the object still has nav mask pixels before place.
 2. `PlaceObjectAtPoint` with **`forceKinematic=True`** (this AI2-THOR Stretch build rejects `forceAction`).
-3. Prefer spawn points ≥ `min_displace_distance` (0.25 m) from origin; try **same receptacle first**, then others in room.
-4. After each place: if **`visible=True`**, **undo** and try another point / receptacle.
-5. Only **log** events that stay not-visible (`hidden_during=True`).
+3. After each place: `Pass` + `renderImageSynthesis`; if still in the image, **undo** and try another point / receptacle.
+4. **Validate before persist:** read back object metadata (same source as `object_state`); require position (and parent, when available) to match the intended place. On mismatch → restore, `displacement_debug` `stage=state_mismatch`, **no** event row / no `hidden_during=True`.
+5. Only **log** events that stay out of the nav image (`hidden_during=True`; `in_fov_just_after=False`).
 
-Does **not** require `instance_detections2D` / `renderImageSynthesis` for displacement.
-Those remain stride-gated only for nav bbox / mask metrics.
+### Distractor candidates (trial teleport)
+
+After a validated real place (or swap), still in the scene at the chosen pose(s):
+
+1. Pick **`nearby_receptacle`**: another usable open receptacle within ~1.5 m xz of the true destination.
+2. Pick **`salient_decoy_location`**: largest-AABB-volume usable receptacle that is **not** near the true destination.
+3. For each: kinematic place → read resolved pose → **restore** to the real destination. Only the chosen move stays in the scene.
+4. Export all three (when available) to `displacement_candidates-*.csv` (per swapped object as well).
+
+Requires `instance_detections2D` / `renderImageSynthesis` on the stride used for
+displacement eligibility and post-place checks. Nav bbox metrics use the same stride.
 
 ### Tunables (`RoomVisitTask.__init__`)
 
 - `max_displacements` (Collector), `max_displacements_per_step`
 - `max_receptacles_to_try`, `max_place_coords`, `min_displace_distance`
+- `NEARBY_RECEPTACLE_XZ_M` (module constant, default 1.5)
 - `door_log_interval` (default 5)
 
 ---
@@ -198,7 +255,7 @@ Earlier freezes came from:
 Mitigations already in code:
 
 - Cache pickupable id set once for displacement; nav/objects logging uses one metadata reset for all FOV ids.
-- Cache receptacles per room.
+- Cache receptacles per room (**without Floor**).
 - Limit place tries; quiet debug (CSV always; print mainly on success).
 - Sample doors every `door_log_interval` steps.
 - **`max_steps` hard cap** (same idea as an LLM context window): log at most the first
@@ -210,9 +267,10 @@ Mitigations already in code:
   doors / object_state / region_trajectory / displacement_debug so RAM stays bounded.
 - **FOV synthesis stride**: `renderInstanceSegmentation=True` at controller init, but
   per-step `renderImageSynthesis` is `True` only every
-  `stride = max(1, max_steps // CAP_PER_EPISODE)` agent steps for nav bbox / mask metrics.
-  **Invisible displacement** uses THOR ``visible`` every step (with raised
-  `visibilityDistance`) and does **not** need synthesis.
+  `stride = max(1, max_steps // CAP_PER_EPISODE)` agent steps for nav bbox / mask metrics
+  **and** for displacement image-FOV tracking. With RoomVisit
+  `CAP_PER_EPISODE = MAX_EPISODE_LEN`, stride is typically **1** (every step).
+  Post-place checks use an extra `Pass` + synthesis only after successful places.
   **Important:** when synthesis is off, THOR may leave *stale* `instance_detections2D`
   on `last_event`. Nav still writes `obj-id` / `obj-distance` every step from
   metadata; bbox / mask columns are filled only when the task passes
@@ -229,7 +287,7 @@ Mitigations already in code:
 |-------|-----|
 | `SPOCObject.get("pickupable", False)` always `False` | Implement `SPOCObject.get()` in `environment/spoc_objects.py` (builtin `dict.get` ignores `__getitem__`) |
 | `PlaceObjectAtPoint(..., forceAction=True)` ValueError | Use `forceKinematic=True` |
-| Objects “appear” after displace | Undo if still `visible=True`; only accept not-visible places |
+| Objects “appear” after displace | Undo if still in nav image (mask pixels); only accept out-of-image places |
 | Scene name always `Procedural` | Use `house_<index>` |
 
 ---
@@ -271,7 +329,19 @@ Legacy spatial QA (`spatial_data_generation.py`, `qa_generator.py`) still consum
 ## 8. Building QA from displacements
 
 **Ground-truth answer surface:** prefer `to_receptacle` / `from_receptacle` from **`displacement_events`**.  
-`object_state.parent_receptacle` can disagree after kinematic place (THOR parenting quirks).
+`object_state.parent_receptacle` can disagree after kinematic place (THOR parenting quirks) — collection now rejects events when parent/position readback mismatches before persist.
+
+Join **`displacement_candidates`** on `event_id` for multiple-choice positions:
+
+- `chosen` — true destination (`is_persisted=True`)
+- `nearby_receptacle` — nearby open surface distractor
+- `salient_decoy_location` — large far surface distractor
+- Original / A-not-B location — `from_pos-*` on the event row (not a candidate role)
+
+For **`object_swap`** events, two rows share `event_id` and point at each other via
+`swap_partner_id` (e.g. cup ↔ pepper). Each row’s `to_*` is the partner’s former pose.
+
+Do **not** expect egocentric direction columns at collection time; compute those later from agent pose at the chosen query step.
 
 ### Validator pattern
 
@@ -284,11 +354,11 @@ For object `O` with event at `T`:
 
 ### Example item types
 
-1. **Final location:** “Where is the cup now?” → options include `to_receptacle` vs `from_receptacle` vs other surfaces.  
+1. **Final location:** “Where is the cup now?” → options from `displacement_candidates` positions / receptacles (+ `from_*` as A-not-B).  
 2. **Same vs other surface:** use `notes` (`same_receptacle_hidden_shift` vs `other_receptacle_hidden_place`).  
 3. **Which object:** “Which object was moved to CounterTop|…?”
 
-`to_receptacle=Floor` is valid but weaker for natural questions; optionally filter when sampling items.
+`to_receptacle=Floor` is **not** produced by current collection (excluded from the candidate pool).
 
 Example past run with 5 events:  
 `…/Generated/navigation/07_13_2026_15_15_34_072561/` (`house_007514`).
@@ -307,9 +377,8 @@ Survey “novel shortcut” validation is mostly **downstream** (cm-benchmark); 
 
 ## 10. Suggested next work (for agents)
 
-- Prefer non-`Floor` destinations (or bias spawn toward tables/counters).  
 - Optional: human-readable receptacle labels for templates.  
-- Writer that emits cm-benchmark items JSON from `displacement_events` + `object_state`.  
+- Writer that emits cm-benchmark items JSON from `displacement_events` + `displacement_candidates` + `object_state` (including egocentric directions at a chosen query step).  
 - Door open/close events for survey door templates (`passage_events`).  
 - Do **not** invent semantic object facing from `obj-rot` unless THOR exposes a trusted signal.
 
@@ -319,8 +388,8 @@ Survey “novel shortcut” validation is mostly **downstream** (cm-benchmark); 
 
 | Path | Notes |
 |------|--------|
-| `collector.py` | Tracking, CSV/JSON export, `episode_meta` |
-| `tasks/room_visit_task.py` | Displacement + layout + RoomVisit `_step` hooks |
+| `collector.py` | Tracking, CSV/JSON export (`displacement_events` + `displacement_candidates`), `episode_meta` |
+| `tasks/room_visit_task.py` | Displacement + Floor-free receptacle pool + **object swap** fallback + distractor trials + layout |
 | `environment/spoc_objects.py` | `.get()` fix |
 | `configure_variables.sh` | Data dirs / navigation output |
 | `README.md` | Short how-to-run; **this file** for full design context |
