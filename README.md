@@ -65,14 +65,22 @@ $OBJAVERSE_NAVIGATION_PATH/<MM_DD_YYYY_HH_MM_SS_ffffff>/
     displacement_candidates-house_XXXXXX.csv
     displacement_debug-house_XXXXXX.csv
     passage_state-house_XXXXXX.csv
-    region_trajectory-house_XXXXXX.csv
     world_layout-house_XXXXXX.json
+    nav_graph-house_XXXXXX.json           # AI2-THOR reachability (≠ SPOC path)
     episode_meta-house_XXXXXX.json        # episode_id, episode_kind, counts
 ```
 
 Scene tag is `house_<index>` (not `Procedural`). Episode identity is the **folder** + `annotations/episode_meta` (not repeated on every CSV row).
 
+**SPOC trajectory vs THOR navigability:** `navigation-*.csv` is the exact agent rollout (actions, success/fail, poses). `nav_graph-*.json` is environment reachability from `GetReachablePositions` (nodes + grid-adjacency edges), snapshotted at episode start and end. Do **not** treat the SPOC path as optimal.
+
 Visibility columns on each navigation object row (`visible-pixels`, `bbox-area`, `min-side`, `occupancy-ratio`): see **[docs/VISIBILITY_METRICS.md](docs/VISIBILITY_METRICS.md)**.
+
+Summarize one export:
+
+```bash
+python scripts/summarize_episode_export.py --run_dir "$RUN"
+```
 
 ---
 
@@ -127,7 +135,9 @@ For **invisible displacement / survey** items, use `object_state`, `displacement
 |------|------|
 | `docs/DATA_COLLECTION.md` | Full design context for agents |
 | `docs/VISIBILITY_METRICS.md` | Formulas for nav visibility CSV columns |
-| `tasks/room_visit_task.py` | RoomVisit step loop, hidden relocation, layout |
-| `collector.py` | CSV/JSON logging, visibility tracking |
+| `tasks/room_visit_task.py` | RoomVisit step loop, hidden relocation, layout, nav graph |
+| `collector.py` | CSV/JSON logging, visibility tracking, `nav_graph` export |
+| `utils/nav_graph_export.py` | Reachable-position nodes + grid-adjacency edges |
+| `scripts/summarize_episode_export.py` | One-episode nav/trajectory summary |
 | `environment/spoc_objects.py` | `SPOCObject.get()` fix |
 | `configure_variables.sh` | Dataset / navigation paths |

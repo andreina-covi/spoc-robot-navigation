@@ -65,20 +65,52 @@ Each episode root has **two** sibling folders:
     displacement_candidates-house_XXXXXX.csv
     displacement_debug-house_XXXXXX.csv
     passage_state-house_XXXXXX.csv
-    region_trajectory-house_XXXXXX.csv
     world_layout-house_XXXXXX.json
+    nav_graph-house_XXXXXX.json
     episode_meta-house_XXXXXX.json
 ```
 
-**Do not** repeat `episode_id` / `scene_id` / `episode_kind` on every CSV row. Those live in `annotations/episode_meta-*.json` and the folder name. Consumers should join on folder + `timestep` / `obj-id`. Navigation `path` columns still point at files under `images/`.
+**Do not** repeat `episode_id` / `scene_id` / `episode_kind` on every CSV row. Those live in `annotations/episode_meta-*.json` and the folder name. Consumers should join on folder + `timestep` / `obj-id` / `node_id`. Navigation `path` columns still point at files under `images/`.
 
 `episode_meta-*.json` also stores run geometry and agent constants needed for offline recomputation:
 
 | Section | Fields |
 |---------|--------|
 | `camera` | `width`, `height`, `frame_size_px`, `fov_vertical_deg` (nav / INTEL) |
-| `agent` | `movement_constant`, `rotation_deg`, `horizon_deg`, `arm_move_constant`, `wrist_rotation_deg` |
+| `agent` | `movement_constant`, `rotation_deg`, `horizon_deg`, `arm_move_constant`, `wrist_rotation_deg`, `reachability_grid_size` |
+| `nav_graph` | pointer + node/edge counts for start/end snapshots |
 | `visibility_filters` | export policy note (no hard thresholds at collection) |
+
+### Trajectory vs navigability (important)
+
+| Source | What it is | What it is not |
+|--------|------------|----------------|
+| `navigation-*.csv` | Exact SPOC rollout: ordered steps, `ag-action`, `action_success`, agent/camera pose, FOV object rows | Not an optimal path; may include fails, rotations, backtracks |
+| `nav_graph-*.json` | AI2-THOR `GetReachablePositions` standable cells + **exported** grid-adjacency edges | Not the agent path; not Euclidean k-NN between nearby points |
+| `world_layout-*.json` | Coarse room/door survey graph | Not fine agent navigation |
+
+**`nav_graph-*.json` structure:**
+
+- Top-level: `episode_id`, `scene_id`, `snapshots`, `notes`
+- `snapshots.episode_start` / `snapshots.episode_end`: each has `nodes`, `edges`, `params`, `door_states_at_snapshot`, `coordinate_frame`
+- Nodes: `node_id`, `x`, `y`, `z` (AI2-THOR meters; **y up**, motion in **xz**)
+- Edges: undirected pairs (`from_node`, `to_node`, `distance_xz`, `cost`, `bidirectional=true`) for **8-connected** neighbors on the reachability grid (`grid_size = 0.75 * agent_move_m`, default 0.15 m). Reconstruction rule is also recorded in `params.edge_rule` so consumers can rebuild the same edges from `nodes` alone if desired.
+- `params`: `grid_size`, `agent_move_m` (0.2), `agent_rotation_deg` (45), `edge_connectivity`, `thor_action`, `snap_to_grid=false`
+
+**Scene state:** start snapshot is taken at task init (before agent steps). End snapshot is re-queried at episode save (after door changes / displacements). Per-step door openness remains in `doors-*.csv` / `passage_state-*.csv`. Displacements that may alter later navigability are in `displacement_events-*.csv`. Prefer start for “map at rollout begin”; compare end if objects/doors moved.
+
+**Assumptions / limitations:**
+
+- Edges are **grid adjacency on the THOR reachability sample**, not proven single-action success for every SPOC heading (agent move is 0.2 m; sample spacing is 0.15 m). Use trajectory `action_success` for what actually happened.
+- Two nearby Euclidean points are **not** connected unless they are adjacent on that grid.
+- We do **not** export a heuristic of which nav edges the agent “knows”; only primitive FOV/visibility in `navigation` / `object_state`.
+- Reachability can change mid-episode; start ≠ end when doors/objects move.
+
+Summarize one run:
+
+```bash
+python scripts/summarize_episode_export.py --run_dir "$OBJAVERSE_NAVIGATION_PATH/<timestamp>"
+```
 
 ### Which objects go where
 
@@ -87,7 +119,7 @@ Each episode root has **two** sibling folders:
 | `navigation-*.csv` | **Named non-structural** FOV objects with `visible-pixels > 0`, **plus visibility metrics**. Drops Wall/Floor and numeric-only ids (e.g. `2|4`). Post-processing decides keep/drop. |
 | `objects-*.csv` | Catalog of those FOV objects seen at least once (with instance color) |
 | `object_state-*.csv` / displacement | **Pickupable** objects tracked after nav mask pixels at least once |
-| `current-room` / `region_trajectory` | **Agent–room** membership (do **not** treat Floor/Wall as the room object) |
+| `current-room` (in `navigation-*.csv`) | **Agent–room** membership (do **not** treat Floor/Wall as the room object) |
 
 **Export vs filter (recommended policy):**
 
@@ -116,12 +148,13 @@ Example post-process keep rule: apply your own cutoffs on
 `visible-pixels` / `min-side` / `occupancy-ratio`.
 
 Fully hidden / behind other geometry never appear in detections. Out-of-camera objects are
-not in `navigation` for that step. Hidden pickupables still appear in `object_state` after
-they were tracked.
+not in `navigation` for that step. Hidden pickupables appear only in `object_state`
+(after they were tracked via mask pixels at least once).
 
 **Spatial relations (post-processing):**
 - Agent ↔ object: use `navigation` rows + agent pose vs object pose / bbox.
 - Agent ↔ room: use `current-room` / `region_trajectory` (and `world_layout`), not structural mesh rows.
+- Agent ↔ navigable map: snap poses to `nav_graph` nodes; do **not** replace the trajectory with a shortest path on that graph.
 
 ### Important columns
 
@@ -158,19 +191,18 @@ HousePlant / Fridge / counters / windows stay in `navigation` only (not displace
 
 Distractor rows are **trial teleports**: same `PlaceObjectAtPoint` + `forceKinematic` as the real move, position read back, then object restored to the chosen pose. Egocentric direction is **not** computed here (depends on later agent pose / query step).
 
-**`navigation-*.csv`:** agent poses, rooms, and **named** objects with `obj-id` /
-`obj-distance` every step when THOR ``visible=True`` (pickupables **and**
-static named objects such as fridge / door / window) or when still tracked.
-`expected-bbox-area` / `expected_cmin`… / `ang-*-deg` come from 3D projection;
-detection bbox metrics only on FOV synthesis strides. Column ``displaced`` marks
-objects that already appear in ``displacement_events`` (new pose is also in
-`object_state` / the event row — use the flag to drop them from some nav analyses).
+**`navigation-*.csv`:** agent poses/rooms every step; **object rows only when
+``visible-pixels > 0``** in that frame (named non-structural FOV objects, including
+fridge / door / window). No padding of hidden tracked pickupables — those stay in
+``object_state``. Optional ``displaced`` flag only appears on in-image rows.
 
 **`objects-*.csv`:** one row per unique named object seen in the episode.
 `bBox-center-*` / `size-*` are **3D AABB** fields from metadata (not segmentation).
 They should be non-zero whenever THOR provides an AABB (independent of synthesis).
 
-**`world_layout-*.json` / `passage_state` / `region_trajectory`:** survey-oriented layout & room path.
+**`world_layout-*.json` / `passage_state`:** survey-oriented layout & room connectivity.
+
+**`nav_graph-*.json`:** fine-grained THOR reachability (see Trajectory vs navigability above).
 
 ---
 
@@ -184,7 +216,7 @@ Implemented in `RoomVisitTask.maybe_displace_hidden_objects` / `_try_hidden_plac
    once — same signal as the RGB frames under `images/`, via `instance_detections2D`.
 2. Absent from the nav image for **≥ 2** consecutive **synthesis** steps
    (`collector.candidates_for_displacement`; `in_camera_fov=False`).
-3. Caps: `max_displacements=5` / episode, `1` displace **operation** / step
+3. Caps: `max_displacements=10` / episode, `1` displace **operation** / step
    (a swap logs two object rows but counts as one step operation; needs ≥2 remaining slots).
 4. Displacement runs only on FOV synthesis strides (when mask/detections exist).
    Off-stride steps freeze `hidden_steps` (do not treat missing masks as “hidden”).
@@ -214,11 +246,15 @@ If receptacle place fails for the primary object:
 
 ### Realism rules (avoid “appears from nothing”)
 
-1. Refuse if the object still has nav mask pixels before place.
+1. Refuse if the object is in the **step nav event** mask set (`in_image_ids` —
+   reuses that frame’s synthesis; no extra Pass).
 2. `PlaceObjectAtPoint` with **`forceKinematic=True`** (this AI2-THOR Stretch build rejects `forceAction`).
-3. After each place: `Pass` + `renderImageSynthesis`; if still in the image, **undo** and try another point / receptacle.
-4. **Validate before persist:** read back object metadata (same source as `object_state`); require position (and parent, when available) to match the intended place. On mismatch → restore, `displacement_debug` `stage=state_mismatch`, **no** event row / no `hidden_during=True`.
-5. Only **log** events that stay out of the nav image (`hidden_during=True`; `in_fov_just_after=False`).
+3. Mid-place undoes use cheap THOR ``visible`` (no synthesis per spawn try).
+4. **One** `Pass` + synthesis for the final mask check before persist (swap: one Pass
+   for both objects). On mask hit → restore, no event row.
+5. **Validate before persist:** read back object metadata; require position (and parent,
+   when available) to match. On mismatch → restore, `stage=state_mismatch`.
+6. Only **log** events that stay out of the nav image (`hidden_during=True`; `in_fov_just_after=False`).
 
 ### Distractor candidates (trial teleport)
 
@@ -264,13 +300,14 @@ Mitigations already in code:
 - **Flush on horizon**: `save_data(reason="done"|"max_steps")` so CSVs exist even when
   the agent never takes `done`.
 - **Incremental CSV flush** every `flush_every` (default 50) steps for navigation /
-  doors / object_state / region_trajectory / displacement_debug so RAM stays bounded.
+  doors / object_state / displacement_debug so RAM stays bounded.
 - **FOV synthesis stride**: `renderInstanceSegmentation=True` at controller init, but
   per-step `renderImageSynthesis` is `True` only every
   `stride = max(1, max_steps // CAP_PER_EPISODE)` agent steps for nav bbox / mask metrics
   **and** for displacement image-FOV tracking. With RoomVisit
   `CAP_PER_EPISODE = MAX_EPISODE_LEN`, stride is typically **1** (every step).
-  Post-place checks use an extra `Pass` + synthesis only after successful places.
+  Post-place: mid-loop uses THOR ``visible``; **one** mask Pass after a candidate
+  place (or one Pass covering both objects after a swap).
   **Important:** when synthesis is off, THOR may leave *stale* `instance_detections2D`
   on `last_event`. Nav still writes `obj-id` / `obj-distance` every step from
   metadata; bbox / mask columns are filled only when the task passes
@@ -368,10 +405,11 @@ Example past run with 5 events:
 ## 9. Survey side (lighter)
 
 - `build_world_layout()` → rooms, doors as passages, landmark heuristics, connectivity.  
-- `region_trajectory` from agent room each step.  
+- Agent room each step: `navigation-*.csv` columns `current-room`, `current-room-type`, `room-just-entered`.  
 - `passage_state` derived from door logging (sparse in time).  
+- `nav_graph-*.json` from `GetReachablePositions` (start + end); see § output layout.
 
-Survey “novel shortcut” validation is mostly **downstream** (cm-benchmark); collection provides layout + trajectory evidence.
+Survey “novel shortcut” validation is mostly **downstream** (cm-benchmark); collection provides layout + trajectory + reachability evidence.
 
 ---
 
@@ -388,8 +426,10 @@ Survey “novel shortcut” validation is mostly **downstream** (cm-benchmark); 
 
 | Path | Notes |
 |------|--------|
-| `collector.py` | Tracking, CSV/JSON export (`displacement_events` + `displacement_candidates`), `episode_meta` |
-| `tasks/room_visit_task.py` | Displacement + Floor-free receptacle pool + **object swap** fallback + distractor trials + layout |
+| `collector.py` | Tracking, CSV/JSON export, `nav_graph` + `episode_meta` |
+| `tasks/room_visit_task.py` | Displacement + Floor-free receptacle pool + **object swap** + nav graph snapshots |
+| `utils/nav_graph_export.py` | Reachable nodes + 8-connected edges |
+| `scripts/summarize_episode_export.py` | Episode trajectory / nav summary |
 | `environment/spoc_objects.py` | `.get()` fix |
 | `configure_variables.sh` | Data dirs / navigation output |
 | `README.md` | Short how-to-run; **this file** for full design context |

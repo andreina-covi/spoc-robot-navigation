@@ -52,7 +52,6 @@ class Collector:
         "navigation",
         "doors",
         "object_state",
-        "region_trajectory",
         "passage_state",
         "displacement_debug",
     )
@@ -62,7 +61,7 @@ class Collector:
         scene_name=None,
         episode_kind="invisible_displacement",
         environment="ai2thor",
-        max_displacements=5,
+        max_displacements=10,
         max_steps=None,
         flush_every=50,
     ):
@@ -73,7 +72,6 @@ class Collector:
         self.data_displacement_events = []
         self.data_displacement_candidates = []
         self.data_displacement_debug = []  # attempts / failures for diagnosing 0 displacements
-        self.data_region_trajectory = []
         self.timestep = 0
         # ProcTHOR always reports sceneName="Procedural"; use house_index instead
         self.scene_name = scene_name if scene_name is not None else "unknown"
@@ -99,6 +97,8 @@ class Collector:
         self.tracked_objects = {}
         self.displaced_object_ids = set()
         self.world_layout = None
+        # AI2-THOR reachability graphs (independent of SPOC trajectory)
+        self.nav_graphs = {}  # snapshot -> graph dict
         # How often RoomVisit enables renderImageSynthesis for FOV object logging
         self.fov_stride = 1
         # Synced from StretchController.calibrate_agent (RotateCameraMount / FOV)
@@ -152,14 +152,14 @@ class Collector:
     def get_object_data(self, arr_objects, event, include_detections=False):
         """Collect named non-structural objects for navigation / objects CSV.
 
-        Always emit ``obj-id`` and ``obj-distance`` from metadata (no detections needed).
-        Bbox / visible-pixels / occupancy are filled **only** when
-        ``include_detections=True`` and ``event`` is the navigation step that actually
-        ran ``renderImageSynthesis``.
+        Navigation rows are emitted **only** when the object has mask pixels in the
+        current nav frame (``visible-pixels > 0``) — same signal as displacement
+        image FOV. Hidden / tracked-only objects belong in ``object_state``, not
+        navigation.
 
-        Important: use the nav ``event`` snapshot — do **not** read
-        ``controller.last_event`` after later PlaceObjectAtPoint / Pass steps, which
-        run without synthesis and wipe or stale-out detections.
+        Bbox metrics require ``include_detections=True`` and the nav ``event`` that
+        ran ``renderImageSynthesis`` (do not use ``controller.last_event`` after
+        later PlaceObjectAtPoint / Pass steps).
         """
         objects = {}
         cond_objs = []
@@ -192,6 +192,31 @@ class Collector:
             color = self.dict_colors.get(oid)
             if color is None:
                 continue
+
+            # Require in-image mask pixels for a navigation row (clean FOV export)
+            visible_pixels = None
+            bbox = None
+            bbox_area = None
+            min_side = None
+            occupancy = None
+            if not (
+                include_detections
+                and has_detections
+                and seg_frame is not None
+                and oid in detections
+            ):
+                continue
+            cand = detections[oid]
+            visible_pixels = self.get_visible_pixels_from_bbox(event, cand, color)
+            if visible_pixels is None or visible_pixels <= 0:
+                continue
+            cmin, rmin, cmax, rmax = cand
+            bbox_area = (cmax - cmin) * (rmax - rmin)
+            if bbox_area <= 0:
+                continue
+            bbox = cand
+            min_side = min(cmax - cmin, rmax - rmin)
+            occupancy = np.round(visible_pixels / bbox_area, 3)
 
             # Prefer OOBB corners for projection; AABB for catalog center/size.
             oobb = obj_dict.get("objectOrientedBoundingBox")
@@ -239,7 +264,6 @@ class Collector:
                 ang_height_deg = None
 
             # Catalog / objects-*.csv — 3D metadata (not segmentation).
-            # AABB center/size; never default to zeros from an OOBB without those fields.
             center, size = box_center_size(aabb=aabb, oobb=oobb)
             objects[oid] = (
                 obj_type,
@@ -255,45 +279,12 @@ class Collector:
             )
 
             dist = float(obj_dict.get("distance") or 0.0)
-            bbox = None
-            visible_pixels = None
-            bbox_area = None
-            min_side = None
-            occupancy = None
-
-            # Pixel metrics only on synthesis-stride steps (from the nav event)
-            if (
-                include_detections
-                and has_detections
-                and seg_frame is not None
-                and oid in detections
-            ):
-                cand = detections[oid]
-                visible_pixels = self.get_visible_pixels_from_bbox(event, cand, color)
-                if visible_pixels > 0:
-                    cmin, rmin, cmax, rmax = cand
-                    bbox_area = (cmax - cmin) * (rmax - rmin)
-                    if bbox_area > 0:
-                        bbox = cand
-                        min_side = min(cmax - cmin, rmax - rmin)
-                        occupancy = np.round(visible_pixels / bbox_area, 3)
-                    else:
-                        visible_pixels = None
-                        bbox_area = None
-                else:
-                    visible_pixels = None
-
-            # Always a nav row: id + distance every step; 3D-expected metrics when
-            # projectable; detection metrics may be None off-stride / out of FOV.
-            # Layout: [oid, dist, det_bbox, exp_area, ang_w, ang_h,
-            #          exp_cmin, exp_cmax, exp_rmin, exp_rmax,
-            #          vis_px, det_area, min_side, occ, displaced]
             was_displaced = oid in self.displaced_object_ids
             cond_objs.append(
                 [
                     oid,
                     np.round(dist, 4),
-                    bbox if bbox is not None else [None, None, None, None],
+                    bbox,
                     None
                     if expected_bbox_area is None
                     else float(np.round(expected_bbox_area, 2)),
@@ -642,18 +633,6 @@ class Collector:
             cols["to_region"].append(entry["room1"])
         return cols
 
-    def get_dict_region_trajectory(self):
-        cols = {
-            "timestep": [],
-            "region_id": [],
-            "region_type": [],
-        }
-        for entry in self.data_region_trajectory:
-            cols["timestep"].append(entry["timestep"])
-            cols["region_id"].append(entry["region_id"])
-            cols["region_type"].append(entry["region_type"])
-        return cols
-
     def update_visibility_tracking(self, in_image_pickupable_meta):
         """Track pickupables by **nav-image** presence (detections + mask pixels).
 
@@ -831,6 +810,21 @@ class Collector:
     def set_world_layout(self, layout):
         self.world_layout = layout
 
+    def set_nav_graph(self, graph, snapshot=None):
+        """Store a GetReachablePositions nav graph for one scene-state snapshot.
+
+        ``snapshot`` is typically ``episode_start`` or ``episode_end``. Graphs are
+        written in ``save_data`` as ``nav_graph-*.json`` (not the agent trajectory).
+        """
+        if graph is None:
+            return
+        g = dict(graph)
+        snap = snapshot or g.get("snapshot") or "episode_start"
+        g["snapshot"] = snap
+        g["episode_id"] = self.episode_id
+        g["scene_id"] = self.scene_name
+        self.nav_graphs[snap] = g
+
     def _csv_path(self, table: str) -> str:
         return os.path.join(self.annotations_dir, f"{table}-{self.scene_name}.csv")
 
@@ -860,9 +854,6 @@ class Collector:
         if self.data_object_state:
             self._append_table("object_state", self.get_dict_object_state())
             self.data_object_state.clear()
-        if self.data_region_trajectory:
-            self._append_table("region_trajectory", self.get_dict_region_trajectory())
-            self.data_region_trajectory.clear()
         if self.data_displacement_debug:
             self._append_table("displacement_debug", self.get_dict_displacement_debug())
             self.data_displacement_debug.clear()
@@ -961,14 +952,6 @@ class Collector:
                         }
                     )
 
-            self.data_region_trajectory.append(
-                {
-                    "timestep": self.timestep,
-                    "region_id": current_room,
-                    "region_type": current_room_type,
-                }
-            )
-
             if object_states:
                 for row in object_states:
                     self.log_object_state_row(
@@ -1008,7 +991,6 @@ class Collector:
                     "navigation": self.get_dict_navigation,
                     "doors": self.get_dict_doors,
                     "object_state": self.get_dict_object_state,
-                    "region_trajectory": self.get_dict_region_trajectory,
                     "passage_state": self.get_dict_passage_state,
                     "displacement_debug": self.get_dict_displacement_debug,
                 }[table]()
@@ -1031,6 +1013,21 @@ class Collector:
             layout["episode_id"] = self.episode_id
             with open(self._json_path("world_layout"), "w") as f:
                 json.dump(layout, f, indent=2)
+
+        if self.nav_graphs:
+            nav_export = {
+                "episode_id": self.episode_id,
+                "scene_id": self.scene_name,
+                "snapshots": self.nav_graphs,
+                "notes": (
+                    "AI2-THOR navigability (GetReachablePositions), independent of the "
+                    "SPOC trajectory in navigation-*.csv. Prefer episode_start for the "
+                    "environment at rollout begin; episode_end reflects doors/objects "
+                    "after the episode. Do not treat the SPOC path as optimal."
+                ),
+            }
+            with open(self._json_path("nav_graph"), "w") as f:
+                json.dump(nav_export, f, indent=2)
 
         fail_counts = {}
         debug_path = self._csv_path("displacement_debug")
@@ -1077,14 +1074,31 @@ class Collector:
                 "horizon_deg": HORIZON,
                 "arm_move_constant": ARM_MOVE_CONSTANT,
                 "wrist_rotation_deg": WRIST_ROTATION,
+                "reachability_grid_size": AGENT_MOVEMENT_CONSTANT * 0.75,
+            },
+            "nav_graph": {
+                "file": f"nav_graph-{self.scene_name}.json",
+                "snapshots": sorted(self.nav_graphs.keys()),
+                "num_nodes_start": (
+                    self.nav_graphs.get("episode_start", {}).get("num_nodes")
+                ),
+                "num_edges_start": (
+                    self.nav_graphs.get("episode_start", {}).get("num_edges")
+                ),
+                "num_nodes_end": (
+                    self.nav_graphs.get("episode_end", {}).get("num_nodes")
+                ),
+                "num_edges_end": (
+                    self.nav_graphs.get("episode_end", {}).get("num_edges")
+                ),
             },
             "visibility_filters": {
                 "note": (
-                    "navigation/objects CSV: named non-structural FOV objects "
-                    "(drops Wall/Floor and numeric-only ids). "
-                    "Displacement / object_state.in_camera_fov: pickupables with "
-                    "nav mask pixels (visible-pixels > 0) on synthesis strides; "
-                    "object_state.visible remains THOR metadata."
+                    "navigation/objects CSV: named non-structural objects with "
+                    "nav mask pixels > 0 only (drops Wall/Floor, numeric-only ids, "
+                    "and hidden tracked pickupables). "
+                    "Displacement / object_state.in_camera_fov: same mask-pixel "
+                    "signal on synthesis strides; object_state.visible is THOR metadata."
                 ),
             },
         }

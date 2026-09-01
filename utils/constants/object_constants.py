@@ -397,7 +397,7 @@ _cached_bad_asset_ids = None
 
 
 # Scene geometry — not useful as entities for agent–object spatial relations.
-# Agent–room membership comes from current-room / region_trajectory, not Floor/Wall rows.
+# Agent–room membership comes from navigation current-room, not Floor/Wall rows.
 STRUCTURAL_OBJECT_TYPES = frozenset(
     {
         "Wall",

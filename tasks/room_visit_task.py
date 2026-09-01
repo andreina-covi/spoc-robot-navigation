@@ -13,6 +13,14 @@ from tasks.abstract_task import AbstractSPOCTask
 from utils.distance_calculation_utils import position_dist
 from utils.type_utils import RewardConfig, THORActions
 from utils.constants.object_constants import is_exportable_object, is_structural_object
+from utils.constants.stretch_initialization_utils import (
+    AGENT_MOVEMENT_CONSTANT,
+    AGENT_ROTATION_DEG,
+)
+from utils.nav_graph_export import (
+    build_nav_graph_from_reachable_positions,
+    reachability_grid_size,
+)
 from training.online.reward.reward_shaper import RoomVisitRewardShaper
 from collector import Collector
 from online_evaluation.max_episode_configs import MAX_EPISODE_LEN_PER_TASK
@@ -82,11 +90,12 @@ class RoomVisitTask(AbstractSPOCTask):
         self.collector = Collector(
             scene_name=scene_name,
             episode_kind="invisible_displacement",
-            max_displacements=5,
+            max_displacements=10,
             max_steps=collector_max_steps,
             flush_every=50,
         )
         self.collector.set_world_layout(self.build_world_layout())
+        self._export_nav_graph_snapshot("episode_start")
         self._displacements_this_step = 0
         self.max_displacements_per_step = 1
         self.max_receptacles_to_try = 4
@@ -211,10 +220,36 @@ class RoomVisitTask(AbstractSPOCTask):
             "passages": passages,
             "connectivity": connectivity,
             "nav_metadata": {
-                "grid_size": None,
-                "notes": "Regions from ProcTHOR rooms; passages from house doors.",
+                "grid_size": reachability_grid_size(),
+                "agent_move_m": AGENT_MOVEMENT_CONSTANT,
+                "agent_rotation_deg": AGENT_ROTATION_DEG,
+                "nav_graph_file": f"nav_graph-{self.collector.scene_name}.json",
+                "notes": (
+                    "This file is room/door survey layout only. Fine-grained "
+                    "AI2-THOR reachability nodes/edges are in nav_graph-*.json "
+                    "(GetReachablePositions), independent of the SPOC trajectory."
+                ),
             },
         }
+
+    def _export_nav_graph_snapshot(self, snapshot: str) -> None:
+        """Export GetReachablePositions graph for the current scene state."""
+        if snapshot == "episode_start":
+            positions = self.reachable_positions
+        else:
+            positions = self.controller.get_reachable_positions()
+            self.reachable_positions_end = positions
+        door_states = self.get_door_states(force=True) or []
+        graph = build_nav_graph_from_reachable_positions(
+            positions,
+            agent_move_m=AGENT_MOVEMENT_CONSTANT,
+            agent_rotation_deg=AGENT_ROTATION_DEG,
+            snapshot=snapshot,
+            scene_id=self.collector.scene_name,
+            episode_id=self.collector.episode_id,
+            door_states=door_states,
+        )
+        self.collector.set_nav_graph(graph, snapshot=snapshot)
 
     def get_door_states(self, force: bool = False):
         """Return open/closed state for doors. Cached between interval steps."""
@@ -296,7 +331,7 @@ class RoomVisitTask(AbstractSPOCTask):
 
         Used for navigation-*.csv and objects-*.csv (spatial-relation candidates).
         Excludes walls/floors/ceilings/rooms and numeric-only ids (e.g. ``2|4``).
-        Agent–room relations use current-room / region_trajectory instead.
+        Agent–room relations use navigation ``current-room`` instead.
         """
         result = []
         if detections is None:
@@ -402,14 +437,14 @@ class RoomVisitTask(AbstractSPOCTask):
                     result.append(o)
         return result
 
-    def _object_in_nav_image(self, object_id: str) -> bool:
-        """True if ``object_id`` has mask pixels in a fresh nav synthesis Pass."""
-        try:
-            event = self.controller.controller.step(
-                action="Pass", renderImageSynthesis=True
-            )
-        except Exception:
-            return False
+    def _nav_synthesis_pass(self):
+        """One Pass + instance synthesis (expensive). Prefer reusing an existing event."""
+        return self.controller.controller.step(
+            action="Pass", renderImageSynthesis=True
+        )
+
+    def _oid_has_mask_pixels(self, object_id: str, event) -> bool:
+        """True if ``object_id`` has mask pixels on an event that already has synthesis."""
         detections = getattr(event, "instance_detections2D", None) or {}
         if object_id not in detections:
             return False
@@ -429,6 +464,35 @@ class RoomVisitTask(AbstractSPOCTask):
             )
         except Exception:
             return True
+
+    def _object_in_nav_image(self, object_id: str, event=None) -> bool:
+        """Mask-pixel visibility. Reuses ``event`` when provided (no extra Pass)."""
+        if event is None:
+            try:
+                event = self._nav_synthesis_pass()
+            except Exception:
+                return False
+        return self._oid_has_mask_pixels(object_id, event)
+
+    def _any_oid_in_nav_image(self, object_ids, event=None) -> bool:
+        """One synthesis (if needed), then check several object ids."""
+        ids = [oid for oid in object_ids if oid]
+        if not ids:
+            return False
+        if event is None:
+            try:
+                event = self._nav_synthesis_pass()
+            except Exception:
+                return False
+        return any(self._oid_has_mask_pixels(oid, event) for oid in ids)
+
+    def _object_thor_visible(self, object_id: str) -> bool:
+        """Cheap mid-loop check from metadata (no synthesis)."""
+        try:
+            obj = self.controller.get_object(object_id)
+            return bool(obj.get("visible", False))
+        except Exception:
+            return False
 
     def _receptacles_in_room(self, room_id: str) -> List[Dict[str, Any]]:
         """Non-pickupable receptacles in ``room_id`` — **Floor excluded** from the pool."""
@@ -605,10 +669,10 @@ class RoomVisitTask(AbstractSPOCTask):
         from_pos,
         from_rotation=None,
     ):
-        """Place object on receptacle only if the new pose stays out of the nav image.
+        """Place object on receptacle; mid-loop undoes with cheap THOR ``visible``.
 
-        After a successful kinematic place, re-render synthesis and undo if the
-        object still has mask pixels in the agent camera.
+        Authoritative mask-pixel check happens once after place succeeds (caller
+        runs a single synthesis Pass). Avoids Pass+synthesis on every spawn try.
         Returns (success, info).
         """
         info = {
@@ -658,10 +722,11 @@ class RoomVisitTask(AbstractSPOCTask):
                 )
                 continue
 
-            if self._object_in_nav_image(object_id):
+            # Cheap filter only — final mask check is a single Pass in the caller
+            if self._object_thor_visible(object_id):
                 info["n_undone_visible"] += 1
                 self._restore_object_pose(object_id, from_pos, from_rotation)
-                info["last_error"] = "placed_but_in_image_undone"
+                info["last_error"] = "placed_but_thor_visible_undone"
                 continue
 
             info["placed_pos"] = pos
@@ -1081,7 +1146,7 @@ class RoomVisitTask(AbstractSPOCTask):
             )
             return None
 
-        if self._object_in_nav_image(oid_a) or self._object_in_nav_image(oid_b):
+        if self._any_oid_in_nav_image([oid_a, oid_b]):
             self._restore_object_pose(oid_a, pos_a, rot_a)
             self._restore_object_pose(oid_b, pos_b, rot_b)
             self.collector.log_displacement_debug(
@@ -1241,8 +1306,11 @@ class RoomVisitTask(AbstractSPOCTask):
         the image after place. If receptacle place fails, try an **object swap**
         with a different-type hidden partner (both out of image).
 
-        ``in_image_ids`` must be the pickupable set from the current nav frame
-        (synthesis step). If ``None``, skip displacement (cannot verify image FOV).
+        ``in_image_ids`` comes from the **same** nav-step synthesis event used for
+        tracking/CSV (no second Pass for eligibility). Mid-place undoes use cheap
+        THOR ``visible``; one synthesis Pass runs only for the final mask check
+        (and one Pass for swap post-check covering both objects).
+        If ``in_image_ids`` is ``None``, skip displacement (cannot verify image FOV).
         """
         events = []
         if in_image_ids is None:
@@ -1664,6 +1732,7 @@ class RoomVisitTask(AbstractSPOCTask):
             self._took_end_action = True
             self._success = self.successful_if_done()
             self.last_action_success = self._success
+            self._export_nav_graph_snapshot("episode_end")
             self.collector.save_data(reason="done")
         elif action_str == THORActions.sub_done:
             self.num_sub_done += 1
@@ -1698,12 +1767,10 @@ class RoomVisitTask(AbstractSPOCTask):
                 }
                 door_states = self.get_door_states()
 
-                # Every step: tracked pickupables + all THOR-visible named objects
-                # (fridge / door / window / furniture — not only pickupables).
-                # Synthesis strides additionally merge FOV detections for bbox metrics.
-                by_id = {o["objectId"]: o for o in self._gather_tracked_object_meta()}
-                for o in self._gather_visible_exportable_objects():
-                    by_id[o["objectId"]] = o
+                # Navigation CSV: only objects with mask pixels in this frame
+                # (same signal as displacement image FOV). Hidden pickupables stay
+                # in object_state / displacement_* — not padded into navigation.
+                by_id = {}
                 include_detections = False
                 if render_mask_this_step:
                     detections = event.instance_detections2D
@@ -1757,6 +1824,7 @@ class RoomVisitTask(AbstractSPOCTask):
             not self._took_end_action
             and self.num_steps_taken() + 1 >= self.max_steps
         ):
+            self._export_nav_graph_snapshot("episode_end")
             self.collector.save_data(reason="max_steps")
 
         step_result = RLStepResult(
