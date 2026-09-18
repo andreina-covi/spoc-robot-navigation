@@ -553,7 +553,7 @@ class RoomVisitTask(AbstractSPOCTask):
         return abs(float(size[0])) * abs(float(size[1])) * abs(float(size[2]))
 
     def _restore_object_pose(self, object_id: str, position, rotation=None) -> bool:
-        """Put object back after a rejected (still-visible) relocation."""
+        """Put object back (rejected place, distractor trial, or after a logged event)."""
         if isinstance(position, (tuple, list)):
             position = {
                 "x": float(position[0]),
@@ -576,6 +576,59 @@ class RoomVisitTask(AbstractSPOCTask):
             kwargs["rotation"] = rotation
         event = self.controller.controller.step(**kwargs)
         return bool(event.metadata.get("lastActionSuccess", False))
+
+    def _restore_logged_displacements(self, poses: List[tuple]) -> bool:
+        """Restore original poses after displacement_events / candidates are logged.
+
+        The relocate is a trial for the invisible-displacement register only;
+        objects must not stay at the recorded destination. A single object is
+        placed back directly. Two objects (swap) are parked first so they do
+        not collide on each other's original poses.
+        """
+        if not poses:
+            return True
+
+        def _warn(oid: str, detail: str) -> None:
+            self.collector.log_displacement_debug(
+                {
+                    "obj_id": oid,
+                    "status": "warn",
+                    "stage": "restore_original_after_log",
+                    "detail": detail,
+                }
+            )
+
+        if len(poses) == 1:
+            oid, pos, rot = poses[0]
+            ok = self._restore_object_pose(oid, pos, rot)
+            if not ok:
+                _warn(oid, "PlaceObjectAtPoint failed restoring original pose")
+            return ok
+
+        oid0, pos0, rot0 = poses[0]
+        p0 = self._xyz_dict(pos0)
+        parked = False
+        for park in (
+            {"x": p0["x"], "y": p0["y"] + 0.5, "z": p0["z"]},
+            {"x": p0["x"] + 0.35, "y": p0["y"] + 0.5, "z": p0["z"] + 0.35},
+            {"x": p0["x"] - 0.35, "y": p0["y"] + 0.6, "z": p0["z"] - 0.35},
+        ):
+            ok_park, _ = self._kinematic_place_at_pose(oid0, park)
+            if ok_park:
+                parked = True
+                break
+        if not parked:
+            _warn(oid0, "failed parking before restoring swap originals")
+
+        all_ok = parked
+        for oid, pos, rot in poses[1:]:
+            if not self._restore_object_pose(oid, pos, rot):
+                all_ok = False
+                _warn(oid, "PlaceObjectAtPoint failed restoring original pose")
+        if not self._restore_object_pose(oid0, pos0, rot0):
+            all_ok = False
+            _warn(oid0, "PlaceObjectAtPoint failed restoring original pose")
+        return all_ok
 
     def _xz_dist(self, p0, p1) -> float:
         if isinstance(p0, dict):
@@ -977,7 +1030,7 @@ class RoomVisitTask(AbstractSPOCTask):
         after_rot,
         receptacles: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        """Chosen + trial-teleport distractor rows for one persisted move."""
+        """Chosen + trial-teleport distractor rows for one recorded (then restored) move."""
         rows = [
             {
                 "event_id": None,
@@ -986,7 +1039,7 @@ class RoomVisitTask(AbstractSPOCTask):
                 "candidate_role": "chosen",
                 "candidate_receptacle": to_receptacle,
                 "candidate_pos": to_pos_rounded,
-                "is_persisted": True,
+                "is_persisted": False,
             }
         ]
         distractors = self._pick_distractor_receptacles(
@@ -1029,6 +1082,7 @@ class RoomVisitTask(AbstractSPOCTask):
         """Fallback: swap two different-type hidden pickupables (both out of image).
 
         Returns two linked event dicts on success, else None (scene restored).
+        On success the swap is logged then both objects are put back.
         """
         type_a = obj_a.get("objectType")
         oid_b = self._pick_swap_partner(oid_a, type_a, room_id, in_image_ids)
@@ -1278,6 +1332,9 @@ class RoomVisitTask(AbstractSPOCTask):
         for row in cand_a + cand_b:
             row["event_id"] = event_id
             self.collector.log_displacement_candidate(row)
+        restored = self._restore_logged_displacements(
+            [(oid_a, pos_a, rot_a), (oid_b, pos_b, rot_b)]
+        )
         self.collector.log_displacement_debug(
             {
                 "obj_id": oid_a,
@@ -1285,7 +1342,8 @@ class RoomVisitTask(AbstractSPOCTask):
                 "stage": "object_swap",
                 "detail": (
                     f"swapped with {oid_b} "
-                    f"n_candidates={len(cand_a) + len(cand_b)}"
+                    f"n_candidates={len(cand_a) + len(cand_b)} "
+                    f"restored_original={restored}"
                 ),
                 "room_id": room_id,
                 "from_receptacle": rec_a,
@@ -1302,9 +1360,10 @@ class RoomVisitTask(AbstractSPOCTask):
         """Move tracked pickupables only while they are absent from the nav image.
 
         Seen = mask pixels in the agent camera at least once; displace after ≥2
-        synthesis steps without mask pixels; keep the move only if still not in
-        the image after place. If receptacle place fails, try an **object swap**
-        with a different-type hidden partner (both out of image).
+        synthesis steps without mask pixels; log the move only if still not in
+        the image after place, then restore original poses. If receptacle place
+        fails, try an **object swap** with a different-type hidden partner
+        (both out of image), log it, then restore both.
 
         ``in_image_ids`` comes from the **same** nav-step synthesis event used for
         tracking/CSV (no second Pass for eligibility). Mid-place undoes use cheap
@@ -1543,7 +1602,8 @@ class RoomVisitTask(AbstractSPOCTask):
 
             after_rot = obj_after.get("rotation")
 
-            # Trial-teleport distractors (same PlaceObjectAtPoint mode); restore to real pose
+            # Trial-teleport distractors; restore to chosen pose between trials.
+            # After logging, the object itself is restored to from_pos.
             distractors = self._pick_distractor_receptacles(
                 receptacles, to_receptacle, resolved_pos
             )
@@ -1555,7 +1615,7 @@ class RoomVisitTask(AbstractSPOCTask):
                     "candidate_role": "chosen",
                     "candidate_receptacle": to_receptacle,
                     "candidate_pos": to_pos_rounded,
-                    "is_persisted": True,
+                    "is_persisted": False,
                 }
             ]
             for role, rec in distractors.items():
@@ -1614,6 +1674,7 @@ class RoomVisitTask(AbstractSPOCTask):
             for row in candidate_rows:
                 row["event_id"] = event_id
                 self.collector.log_displacement_candidate(row)
+            restored = self._restore_logged_displacements([(oid, from_pos, from_rot)])
             self.collector.log_displacement_debug(
                 {
                     "obj_id": oid,
@@ -1621,7 +1682,8 @@ class RoomVisitTask(AbstractSPOCTask):
                     "stage": "placed_hidden",
                     "detail": (
                         f"notes={notes} n_undone_visible={n_undone_visible} "
-                        f"parent_ok={parent_ok} n_candidates={len(candidate_rows)}"
+                        f"parent_ok={parent_ok} n_candidates={len(candidate_rows)} "
+                        f"restored_original={restored}"
                     ),
                     "room_id": room_id,
                     "from_receptacle": from_receptacle,

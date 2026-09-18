@@ -97,14 +97,14 @@ Each episode root has **two** sibling folders:
 - Edges: undirected pairs (`from_node`, `to_node`, `distance_xz`, `cost`, `bidirectional=true`) for **8-connected** neighbors on the reachability grid (`grid_size = 0.75 * agent_move_m`, default 0.15 m). Reconstruction rule is also recorded in `params.edge_rule` so consumers can rebuild the same edges from `nodes` alone if desired.
 - `params`: `grid_size`, `agent_move_m` (0.2), `agent_rotation_deg` (45), `edge_connectivity`, `thor_action`, `snap_to_grid=false`
 
-**Scene state:** start snapshot is taken at task init (before agent steps). End snapshot is re-queried at episode save (after door changes / displacements). Per-step door openness remains in `doors-*.csv` / `passage_state-*.csv`. Displacements that may alter later navigability are in `displacement_events-*.csv`. Prefer start for “map at rollout begin”; compare end if objects/doors moved.
+**Scene state:** start snapshot is taken at task init (before agent steps). End snapshot is re-queried at episode save (after door changes). Per-step door openness remains in `doors-*.csv` / `passage_state-*.csv`. Invisible displacements are **logged then undone**, so they do not change later navigability; use `displacement_events-*.csv` for recorded relocations, not the live scene. Prefer start for “map at rollout begin”; compare end if doors moved.
 
 **Assumptions / limitations:**
 
 - Edges are **grid adjacency on the THOR reachability sample**, not proven single-action success for every SPOC heading (agent move is 0.2 m; sample spacing is 0.15 m). Use trajectory `action_success` for what actually happened.
 - Two nearby Euclidean points are **not** connected unless they are adjacent on that grid.
 - We do **not** export a heuristic of which nav edges the agent “knows”; only primitive FOV/visibility in `navigation` / `object_state`.
-- Reachability can change mid-episode; start ≠ end when doors/objects move.
+- Reachability can change mid-episode; start ≠ end when **doors** move. Invisible displacements are logged then undone, so they should not change the end snapshot.
 
 Summarize one run:
 
@@ -176,7 +176,7 @@ HousePlant / Fridge / counters / windows stay in `navigation` only (not displace
   - `moved_via=direct` — place onto a receptacle spawn
   - `moved_via=swap` — exchanged poses with `swap_partner_id` (different `objectType`)
   - `notes`: `same_receptacle_hidden_shift` | `other_receptacle_hidden_place` | `object_swap`
-- A-not-B / original location for QA is **`from_pos-*`** (no extra column)
+- After the row is written, the object is **restored** to `from_pos-*` (scene unchanged)
 
 **`displacement_candidates-*.csv`** (three roles per accepted event when available):
 
@@ -187,9 +187,11 @@ HousePlant / Fridge / counters / windows stay in `navigation` only (not displace
 | `candidate_role` | `chosen` \| `nearby_receptacle` \| `salient_decoy_location` |
 | `candidate_receptacle` | Destination surface for that candidate |
 | `candidate_pos-x/y/z` | Engine-resolved position after kinematic place |
-| `is_persisted` | `True` only for `chosen` (real move left in the scene) |
+| `is_persisted` | Always `False`: the relocate is logged, then objects return to `from_pos-*` |
 
-Distractor rows are **trial teleports**: same `PlaceObjectAtPoint` + `forceKinematic` as the real move, position read back, then object restored to the chosen pose. Egocentric direction is **not** computed here (depends on later agent pose / query step).
+Chosen and distractor rows are **trial teleports**: same `PlaceObjectAtPoint` + `forceKinematic`, position read back, then objects restored to their **original** poses. The register is `displacement_events`; the live scene is unchanged. Egocentric direction is **not** computed here (depends on later agent pose / query step).
+
+Original / A-not-B location for QA is **`from_pos-*`** on the event row (no extra column). The scene after the event matches that original pose.
 
 **`navigation-*.csv`:** agent poses/rooms every step; **object rows only when
 ``visible-pixels > 0``** in that frame (named non-structural FOV objects, including
@@ -241,8 +243,8 @@ If receptacle place fails for the primary object:
    (a direct A→B place fails while B still occupies the destination).
    Floor is only a temporary hold — not a persisted `to_receptacle`.
 3. Require **both** still out of image; validate positions; else restore both.
-4. Persist **two** `displacement_events` rows sharing one `event_id`,
-   `moved_via=swap`, `notes=object_swap`, mutual `swap_partner_id`.
+4. Log **two** `displacement_events` rows sharing one `event_id`,
+   `moved_via=swap`, `notes=object_swap`, mutual `swap_partner_id`, then restore both.
 
 ### Realism rules (avoid “appears from nothing”)
 
@@ -250,20 +252,24 @@ If receptacle place fails for the primary object:
    reuses that frame’s synthesis; no extra Pass).
 2. `PlaceObjectAtPoint` with **`forceKinematic=True`** (this AI2-THOR Stretch build rejects `forceAction`).
 3. Mid-place undoes use cheap THOR ``visible`` (no synthesis per spawn try).
-4. **One** `Pass` + synthesis for the final mask check before persist (swap: one Pass
+4. **One** `Pass` + synthesis for the final mask check before logging (swap: one Pass
    for both objects). On mask hit → restore, no event row.
-5. **Validate before persist:** read back object metadata; require position (and parent,
+5. **Validate before logging:** read back object metadata; require position (and parent,
    when available) to match. On mismatch → restore, `stage=state_mismatch`.
 6. Only **log** events that stay out of the nav image (`hidden_during=True`; `in_fov_just_after=False`).
+7. **Restore original poses** after `displacement_events` / `displacement_candidates`
+   are written (`_restore_logged_displacements`). The register is the log; the live
+   scene must match `from_pos-*` again (swap: park then restore both).
 
 ### Distractor candidates (trial teleport)
 
-After a validated real place (or swap), still in the scene at the chosen pose(s):
+After a validated place (or swap), while still at the chosen pose(s) **before** original restore:
 
 1. Pick **`nearby_receptacle`**: another usable open receptacle within ~1.5 m xz of the true destination.
 2. Pick **`salient_decoy_location`**: largest-AABB-volume usable receptacle that is **not** near the true destination.
-3. For each: kinematic place → read resolved pose → **restore** to the real destination. Only the chosen move stays in the scene.
+3. For each: kinematic place → read resolved pose → **restore** to the chosen destination (so the next trial starts from there).
 4. Export all three (when available) to `displacement_candidates-*.csv` (per swapped object as well).
+5. Then restore every moved object to its **original** pose. Nothing stays displaced in the scene.
 
 Requires `instance_detections2D` / `renderImageSynthesis` on the stride used for
 displacement eligibility and post-place checks. Nav bbox metrics use the same stride.
@@ -366,14 +372,14 @@ Legacy spatial QA (`spatial_data_generation.py`, `qa_generator.py`) still consum
 ## 8. Building QA from displacements
 
 **Ground-truth answer surface:** prefer `to_receptacle` / `from_receptacle` from **`displacement_events`**.  
-`object_state.parent_receptacle` can disagree after kinematic place (THOR parenting quirks) — collection now rejects events when parent/position readback mismatches before persist.
+`object_state.parent_receptacle` can disagree after kinematic place (THOR parenting quirks) — collection now rejects events when parent/position readback mismatches before logging. After a valid log, objects return to `from_*`, so later `object_state` rows should match the original pose.
 
 Join **`displacement_candidates`** on `event_id` for multiple-choice positions:
 
-- `chosen` — true destination (`is_persisted=True`)
+- `chosen` — recorded destination (`is_persisted=False`; object restored after log)
 - `nearby_receptacle` — nearby open surface distractor
 - `salient_decoy_location` — large far surface distractor
-- Original / A-not-B location — `from_pos-*` on the event row (not a candidate role)
+- Original / A-not-B location — `from_pos-*` on the event row (not a candidate role); this is also the live pose after restore
 
 For **`object_swap`** events, two rows share `event_id` and point at each other via
 `swap_partner_id` (e.g. cup ↔ pepper). Each row’s `to_*` is the partner’s former pose.
@@ -386,7 +392,7 @@ For object `O` with event at `T`:
 
 1. Some `t < T`: `in_camera_fov=True` (seen).
 2. Some `t` with `T-ε ≤ t < T`: `in_camera_fov=False` still at `from_*` (hidden before move).
-3. At `T`: pose/receptacle change; `hidden_during=True`; `in_fov_just_after=False`.
+3. At `T`: `displacement_events` records `from_*` → `to_*`; `hidden_during=True`; `in_fov_just_after=False`. The object is then restored, so later `object_state` rows stay at `from_*`.
 4. Last logged step for `O`: `in_camera_fov=False`.
 
 ### Example item types
