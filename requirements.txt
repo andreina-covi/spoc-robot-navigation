@@ -1,81 +1,89 @@
-# Checks style, syntax, and other useful errors.
-flake8
+# SPOC-compatible Python deps (Python 3.9+).
+# Install:
+#   pip install -r requirements.txt
+#
+# The custom Stretch AI2-THOR build is on AllenAI's index (not PyPI).
+# Pins below match upstream SPOC (torch 2.0.1 / numpy 1.23.5 / allenact 0.5.4).
+# Do not bump those without re-testing online eval.
 
-# Static type checking
-mypy==1.2.0
+--extra-index-url https://ai2thor-pypi.allenai.org
 
-# Automatic code formatting
-black
-
-# Running tests
-pytest
-pytest-xdist
-
-# Flaky tests
-flaky
-
-# Other reqs
-invoke==2.0.0
-attrs
-prior
-stringcase
-nltk @ git+https://github.com/nltk/nltk@582e6e35f0e6c984b44ec49dcb8846d9c011d0a8
-phonemizer
-networkx
-numpy-quaternion==2022.4.1
-tensorboardx>=2.1
-setproctitle
-moviepy>=1.0.3
-filelock
-numpy==1.23.5
-matplotlib>=3.3.1
-opencv-python
-wheel>=0.36.2
-attrs>=21.4.0
-scipy>=1.5.4
-prior
-canonicaljson
-plotly
-shapely
-h5py
-pyquaternion>=0.9.9
-omegaconf
-boto3
-petname
-wget
-pandas
-python-sat
-python-fcl
-invoke
-wandb
-scikit-video
-nbformat
-pre-commit
-black==23.3.0
-scikit-image
-torchmetrics
-av
-shortuuid
-transformers
-ipdb
-decorator==4.4.2
-timeout-decorator
+# --- Simulation ---
+ai2thor==0+5d0ab8ab8760eb584c5ae659c2b2b951cab23246
 objathor>=0.0.2
-
-# for objaverse pipeline
-trimesh
 objaverse
-compress_pickle
-compress_json
+prior
+trimesh
 
-# for proper determiners with phonemization
-phonemizer
-
+# --- Training / eval stack ---
 allenact==0.5.4
 allenact_plugins[all]
--e git+https://github.com/openai/CLIP.git@a1d071733d7111c9c014f024669f959182114e33#egg=clip
 torch==2.0.1
 torchvision
 xformers
 lightning
 open-clip-torch
+-e git+https://github.com/openai/CLIP.git@a1d071733d7111c9c014f024669f959182114e33#egg=clip
+transformers
+torchmetrics
+wandb
+tensorboardx>=2.1
+omegaconf
+gym
+h5py
+av
+
+# --- Data collection / export (Collector, RoomVisit, episode CSVs) ---
+numpy==1.23.5
+pandas
+opencv-python
+shapely
+scipy>=1.5.4
+matplotlib>=3.3.1
+scikit-image
+Pillow
+tqdm
+prettytable
+imageio
+PyYAML
+typing_extensions
+
+# --- Geometry / assets / language ---
+networkx
+numpy-quaternion==2022.4.1
+pyquaternion>=0.9.9
+nltk @ git+https://github.com/nltk/nltk@582e6e35f0e6c984b44ec49dcb8846d9c011d0a8
+phonemizer
+compress_pickle
+compress_json
+stringcase
+canonicaljson
+attrs>=21.4.0
+moviepy>=1.0.3
+scikit-video
+plotly
+python-sat
+python-fcl
+
+# --- Utilities ---
+boto3
+filelock
+petname
+wget
+shortuuid
+setproctitle
+decorator==4.4.2
+timeout-decorator
+invoke==2.0.0
+
+# --- Dev / lint / test ---
+black==23.3.0
+flake8
+mypy==1.2.0
+pre-commit
+pytest
+pytest-xdist
+flaky
+ipdb
+nbformat
+wheel>=0.36.2

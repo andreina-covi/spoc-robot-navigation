@@ -13,6 +13,21 @@ It introduces new modules for spatial-semantic grounding, map-based navigation, 
 
 ## 1. Environment setup
 
+Python **3.9+**. Install the stack from [`requirements.txt`](requirements.txt) (simulation, training/eval, data collection, and the custom Stretch AI2-THOR build from AllenAI’s index):
+
+```bash
+python -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -U pip
+pip install -r requirements.txt
+```
+
+That single `pip` command also installs `ai2thor==0+5d0ab8ab…` via `--extra-index-url https://ai2thor-pypi.allenai.org` (no second install step). `CLIP` and `nltk` come from pinned git commits, so `git` must be on `PATH`.
+
+Leave these pins unless you re-test online eval: `torch==2.0.1`, `numpy==1.23.5`, `allenact==0.5.4`.
+
+Then set dataset / output paths:
+
 ```bash
 . configure_variables.sh
 ```
@@ -140,4 +155,5 @@ For **invisible displacement / survey** items, use `object_state`, `displacement
 | `utils/nav_graph_export.py` | Reachable-position nodes + grid-adjacency edges |
 | `scripts/summarize_episode_export.py` | One-episode nav/trajectory summary |
 | `environment/spoc_objects.py` | `SPOCObject.get()` fix |
+| `requirements.txt` | Python deps (including Stretch AI2-THOR) |
 | `configure_variables.sh` | Dataset / navigation paths |
