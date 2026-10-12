@@ -137,14 +137,31 @@ python -m spatial_data_generation \
 
 ---
 
-## 5. Generate QA (legacy spatial templates)
+## 5. Normalize object types (after export, before cm-benchmark)
+
+Exported Objaverse objects are stored as `obj-type=Undefined` in the objects table. `object_state` repeats the id head instead (`ObjaBooks`). Both are replaced with the annotation name. Questions need that descriptive name, and cm-benchmark needs a coarser `obj-category` so two nearby objects of the same kind (for example `DiningTable` and `Table`) can be marked as confusable.
+
+`scripts/normalize_object_types.py` only edits files already written by the collector. It does not start AI2-THOR. The path can be one episode folder, its `annotations/` directory, or any parent of episode folders. Run it after an episode export and before building cm-benchmark items.
+
+```bash
+# 1. Propose categories. New names are appended with reviewed=no.
+#    Rows you already edited are left unchanged.
+python scripts/normalize_object_types.py --build-mapping "$OBJAVERSE_NAVIGATION_PATH" --split val
+
+# 2. Review configs/type_mapping.csv, then write obj-type and obj-category.
+python scripts/normalize_object_types.py --apply "$OBJAVERSE_NAVIGATION_PATH" --split val
+```
+
+`--split` is required for annotation lookup when `episode_meta` has a house index but no split. The script does not guess the split. Without it, Objaverse names fall back to the text after `Obja` in the obj-id. The first apply copies each changed file to `<name>.orig.<ext>` and later runs read that copy, so editing the mapping and applying again is safe.
+
+## 6. Generate QA (legacy spatial templates)
 
 For **invisible displacement / survey** items, use `object_state`, `displacement_events`,
 `displacement_candidates`, and `world_layout` (see [docs/DATA_COLLECTION.md](docs/DATA_COLLECTION.md)).
 
 ---
 
-## 6. Code entry points
+## 7. Code entry points
 
 | File | Role |
 |------|------|
@@ -154,6 +171,8 @@ For **invisible displacement / survey** items, use `object_state`, `displacement
 | `collector.py` | CSV/JSON logging, visibility tracking, `nav_graph` export |
 | `utils/nav_graph_export.py` | Reachable-position nodes + grid-adjacency edges |
 | `scripts/summarize_episode_export.py` | One-episode nav/trajectory summary |
+| `scripts/normalize_object_types.py` | Post-export obj-type / obj-category (no simulator) |
+| `configs/type_mapping.csv` | Descriptive name → basic category |
 | `environment/spoc_objects.py` | `SPOCObject.get()` fix |
 | `requirements.txt` | Python deps (including Stretch AI2-THOR) |
 | `configure_variables.sh` | Dataset / navigation paths |
