@@ -303,6 +303,8 @@ class OnlineEvaluatorManager:
             eval_sample_to_normalized_eval_sample(task_type=task_type, sample=samples[i], index=i)
             for i in range(len(samples))
         ]
+        for sample in normalized_samples:
+            sample["house_split"] = "val"
 
         return [normalized_samples[i] for i in sample_ids]
 
@@ -324,7 +326,15 @@ class OnlineEvaluatorManager:
         if self.eval_set_size is not None:
             sample_ids = sample_ids[: self.eval_set_size]
 
-        return {task_type: [samples[i] for i in sample_ids]}
+        house_split = "val" if self.eval_subset in ("val", "minival") else self.eval_subset
+        chosen = []
+        for index in sample_ids:
+            row = samples[index]
+            if isinstance(row, dict):
+                row = dict(row)
+                row["house_split"] = house_split
+            chosen.append(row)
+        return {task_type: chosen}
 
     def load_procthor_houses(self):
         if self.eval_subset in ["val", "minival"]:

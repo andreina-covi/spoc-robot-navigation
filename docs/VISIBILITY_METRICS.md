@@ -1,12 +1,12 @@
 # Visibility metrics in `navigation-*.csv`
 
 These columns describe how much of each object is visible in the **nav camera** frame.
-Collection exports **all named non-structural** FOV detections that have at least one
-mask pixel; it does **not** hard-filter on size or occupancy. Post-processing decides
-keep/drop using `visible-pixels`, `min-side`, and `occupancy-ratio`.
+Collection exports **non-structural** FOV detections that have at least one
+mask pixel, including numeric ids such as `6|5`. It does **not** hard-filter on
+size or occupancy. Post-processing decides keep/drop using `visible-pixels`,
+`min-side`, and `occupancy-ratio`.
 
-Structural meshes (Wall/Floor/Ceiling/…) and numeric-only ids (e.g. `2|4`) are still
-dropped at collection via `is_exportable_object`.
+Wall, Floor, Ceiling, and Room are dropped at collection via `is_exportable_object`.
 
 Implementation: `collector.py` (`get_visible_pixels_from_bbox`, `get_object_data`).
 
@@ -98,12 +98,12 @@ occupancy-ratio  →  “how full is the box with real object pixels?”
 
 | Output | Policy |
 |--------|--------|
-| `navigation` / `objects` CSV | All **named non-structural** FOV objects with `visible-pixels > 0` + metrics |
-| `object_state` / displacement | **Pickupables** only; eligibility uses the same mask-pixel signal (`in_camera_fov`) |
+| `navigation` / `objects` CSV | Non-structural FOV objects with `visible-pixels > 0`, including numeric ids, plus the metrics |
+| `object_state` | **Pickupables** only; eligibility uses the same mask-pixel signal (`in_camera_fov`) |
 | Keep / drop for training or QA | **Post-processing** using the three metrics above |
 
 Collection does not apply recognizability thresholds beyond ``visible-pixels > 0``
-for nav export. Displacement tracking uses the same mask-pixel signal
+for nav export. Pickupable tracking uses the same mask-pixel signal
 (``in_camera_fov``); hidden tracks live in ``object_state`` (see
 [DATA_COLLECTION.md](DATA_COLLECTION.md)).
 
@@ -123,4 +123,4 @@ df = df[
 
 ---
 
-See also: [DATA_COLLECTION.md](DATA_COLLECTION.md) (export layout, displacement, QA).
+See also: [DATA_COLLECTION.md](DATA_COLLECTION.md) (export layout, placement trials, QA).

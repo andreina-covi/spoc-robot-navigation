@@ -163,6 +163,20 @@ def corners_from_box(box: Any) -> Optional[List[np.ndarray]]:
         return None
 
 
+def aabb_bounds(aabb: Any) -> Tuple[Optional[Tuple[float, float, float]], Optional[Tuple[float, float, float]]]:
+    """Axis-aligned min and max corners, each ``(x, y, z)``."""
+    corners = corners_from_box(aabb)
+    if not corners:
+        return None, None
+    arr = np.stack(corners, axis=0)
+    low = arr.min(axis=0)
+    high = arr.max(axis=0)
+    return (
+        (float(low[0]), float(low[1]), float(low[2])),
+        (float(high[0]), float(high[1]), float(high[2])),
+    )
+
+
 def box_center_size(aabb: Any = None, oobb: Any = None) -> Tuple[Dict[str, float], Dict[str, float]]:
     """World-space center and size for objects CSV (3D metadata, not segmentation).
 

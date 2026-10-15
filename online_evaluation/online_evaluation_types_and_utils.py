@@ -82,6 +82,7 @@ def normalized_eval_sample_to_task_spec(s: NormalizedEvalSample) -> "TaskSpec":
     task_spec = {
         "task_type": s["task_type"],
         "house_index": int(s["house_id"]),
+        "house_split": s.get("house_split"),
         "natural_language_spec": s["observations"]["goal"],
         "agent_starting_position": s["observations"]["initial_agent_location"][:3],
         "agent_y_rotation": float(s["observations"]["initial_agent_location"][-2]),

@@ -100,6 +100,8 @@ class MultiTaskSampler(AbstractSPOCTaskSampler):
 
         if "eval_info" in task_spec:
             task_info["eval_info"] = task_spec["eval_info"]
+        if task_spec.get("house_split"):
+            task_info["house_split"] = task_spec["house_split"]
 
         for key in REGISTERED_TASK_PARAMS.get(task_spec["task_type"]):
             if key in task_spec:

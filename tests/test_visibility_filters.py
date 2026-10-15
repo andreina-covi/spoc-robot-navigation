@@ -101,10 +101,12 @@ class TestObjectIdFilters:
         assert not has_named_object_id("")
         assert not has_named_object_id(None)
 
-    def test_exportable_requires_named_non_structural(self):
+    def test_exportable_keeps_numeric_ids_and_drops_structural(self):
         assert is_exportable_object(obj_type="Cup", object_id="Cup|1|2")
-        assert not is_exportable_object(obj_type="Painting", object_id="2|4")
+        assert is_exportable_object(obj_type="Painting", object_id="2|4")
+        assert is_exportable_object(obj_type="Television", object_id="6|5")
         assert not is_exportable_object(obj_type="Wall", object_id="Wall|0|0")
+        assert not is_exportable_object(obj_type="Floor", object_id="6|5")
 
 
 class TestVisibilityMetrics:

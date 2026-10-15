@@ -237,3 +237,8 @@ robot_action_mapping = {
     THORActions.pickup: {"action": "GraspTo", "args": {"move_to": -10}},
     THORActions.dropoff: {"action": "GraspTo", "args": {"move_to": 30}},
 }
+
+# Collector logs the long action name (move_ahead), not the short code (m).
+robot_action_by_name = {
+    stretch_long_names[code]: spec for code, spec in robot_action_mapping.items()
+}

@@ -421,7 +421,7 @@ def is_structural_object(obj_type=None, object_id=None) -> bool:
 def has_named_object_id(object_id) -> bool:
     """True if objectId starts with a type name (e.g. ``Cup|2|10``), not only digits (``2|4``).
 
-    Some THOR assets use numeric-only ids that are not useful for spatial-relation labels.
+    Export does not use this check. A numeric id stays in the objects CSV when its type is not structural.
     """
     if object_id is None:
         return False
@@ -430,8 +430,12 @@ def has_named_object_id(object_id) -> bool:
 
 
 def is_exportable_object(obj_type=None, object_id=None) -> bool:
-    """Objects worth writing to navigation/objects CSV: named, non-structural."""
-    if not has_named_object_id(object_id):
+    """Objects written to navigation/objects CSV.
+
+    Numeric ids such as ``6|5`` stay exportable. The id is the join key and the
+    type carries the name. Walls, floors, ceilings, and rooms stay excluded.
+    """
+    if object_id is not None and not str(object_id).strip():
         return False
     return not is_structural_object(obj_type=obj_type, object_id=object_id)
 

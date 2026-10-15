@@ -5,15 +5,17 @@ It introduces new modules for spatial-semantic grounding, map-based navigation, 
 
 **For agents continuing data-collection / cm-benchmark work**, read:
 
-→ **[docs/DATA_COLLECTION.md](docs/DATA_COLLECTION.md)** — design of `Collector`, RoomVisit invisible displacement, output schemas, realism rules, performance notes, QA usage, and known fixes.
+→ **[docs/DATA_COLLECTION.md](docs/DATA_COLLECTION.md)** — design of `Collector`, RoomVisit placement trials, output schemas, performance notes, and QA usage.
 
 → **[docs/VISIBILITY_METRICS.md](docs/VISIBILITY_METRICS.md)** — how `visible-pixels`, `bbox-area`, `min-side`, and `occupancy-ratio` are calculated.
 
 ---
 
+
+
 ## 1. Environment setup
 
-Python **3.9+**. Install the stack from [`requirements.txt`](requirements.txt) (simulation, training/eval, data collection, and the custom Stretch AI2-THOR build from AllenAI’s index):
+Python **3.9+**. Install the stack from `[requirements.txt](requirements.txt)` (simulation, training/eval, data collection, and the custom Stretch AI2-THOR build from AllenAI’s index):
 
 ```bash
 python -m venv .venv
@@ -40,15 +42,18 @@ This sets (edit paths in `configure_variables.sh` if needed):
 
 ---
 
-## 2. Collect RoomVisit episodes (with invisible displacement + survey logs)
+
+
+## 2. Collect RoomVisit episodes (survey logs)
 
 `RoomVisitTask` uses `Collector` during navigation. While the agent explores:
 
-1. Pickupable objects with THOR `visible=True` are tracked (`visibilityDistance`-based).
-2. After they remain `visible=False` for ≥2 steps, they may be relocated **in the same room** via `PlaceObjectAtPoint`, **only if the new pose remains `visible=False`** (no pop-in).
-3. On episode end (`done` or `max_steps`), logs are saved under `$OBJAVERSE_NAVIGATION_PATH/<timestamp>/` with `images/` and `annotations/`.
+1. A pickupable is tracked the first time it has nav-camera mask pixels. Masks render about every 20 agent steps, including on a short episode.
+2. On episode end (`done` or `max_steps`), logs are saved under `$OBJAVERSE_NAVIGATION_PATH/<timestamp>/` with `images/` and `annotations/`.
 
-Run a short eval (1 episode):
+Placement trials run in that same command, after the agent finishes. The house indexes are the ones already on the eval samples; they are passed in memory. The command writes `$OBJAVERSE_NAVIGATION_PATH/placement_trials/placement_candidates-house_XXXXXX.csv`. Each pickupable is tried on floor points within 1.2 m of landmarks in its room and on the 5 largest non-openable receptacles in that room. One spawn per anchor. The object is restored only when the place succeeds.
+
+Run it:
 
 ```bash
 . configure_variables.sh
@@ -69,20 +74,20 @@ Increase `--eval_set_size` for more episodes. Details, schemas, and QA recipes: 
 ### Output folder layout
 
 ```text
-$OBJAVERSE_NAVIGATION_PATH/<MM_DD_YYYY_HH_MM_SS_ffffff>/
-  images/                                 # RGB frames (img_<t>.png)
-  annotations/                            # all CSV + JSON for the episode
-    navigation-house_XXXXXX.csv
-    objects-house_XXXXXX.csv
-    doors-house_XXXXXX.csv
-    object_state-house_XXXXXX.csv
-    displacement_events-house_XXXXXX.csv
-    displacement_candidates-house_XXXXXX.csv
-    displacement_debug-house_XXXXXX.csv
-    passage_state-house_XXXXXX.csv
-    world_layout-house_XXXXXX.json
-    nav_graph-house_XXXXXX.json           # AI2-THOR reachability (≠ SPOC path)
-    episode_meta-house_XXXXXX.json        # episode_id, episode_kind, counts
+$OBJAVERSE_NAVIGATION_PATH/
+  placement_trials/
+    placement_candidates-house_XXXXXX.csv
+  <MM_DD_YYYY_HH_MM_SS_ffffff>/
+    images/                                 # RGB frames (img_<t>.png)
+    annotations/                            # all CSV + JSON for the episode
+      navigation-house_XXXXXX.csv
+      objects-house_XXXXXX.csv
+      doors-house_XXXXXX.csv
+      object_state-house_XXXXXX.csv
+      passage_state-house_XXXXXX.csv
+      world_layout-house_XXXXXX.json
+      nav_graph-house_XXXXXX.json           # AI2-THOR reachability (≠ SPOC path)
+      episode_meta-house_XXXXXX.json        # episode_id, episode_kind, counts
 ```
 
 Scene tag is `house_<index>` (not `Procedural`). Episode identity is the **folder** + `annotations/episode_meta` (not repeated on every CSV row).
@@ -99,6 +104,8 @@ python scripts/summarize_episode_export.py --run_dir "$RUN"
 
 ---
 
+
+
 ## 3. Review collected data
 
 ```bash
@@ -108,10 +115,9 @@ export SCENE=house_XXXXXX
 cat "$RUN/annotations/episode_meta-${SCENE}.json"
 ```
 
-Check `num_displacements`, then `annotations/displacement_events-*.csv`,
-`annotations/displacement_candidates-*.csv` (chosen + distractor positions), and the
-corresponding `object_state` track (`in_camera_fov`/`visible` true → false → move while false).
-Full review snippets and question examples: [docs/DATA_COLLECTION.md](docs/DATA_COLLECTION.md) §§7–8.
+Placement trials from that same command are `placement_trials/placement_candidates-house_XXXXXX.csv`. The house indexes come from the eval samples.
+`success` marks a place that was read and then restored.
+Full review snippets: [docs/DATA_COLLECTION.md](docs/DATA_COLLECTION.md) §§7–8.
 
 ---
 
@@ -139,40 +145,44 @@ python -m spatial_data_generation \
 
 ## 5. Normalize object types (after export, before cm-benchmark)
 
-Exported Objaverse objects are stored as `obj-type=Undefined` in the objects table. `object_state` repeats the id head instead (`ObjaBooks`). Both are replaced with the annotation name. Questions need that descriptive name, and cm-benchmark needs a coarser `obj-category` so two nearby objects of the same kind (for example `DiningTable` and `Table`) can be marked as confusable.
+New exports write descriptive `obj-type`, `obj-synset`, and `assetId` while collecting. This script does the same fill for older episodes whose objects table still says `Undefined`, and prints confusable pairs from the synsets.
 
 `scripts/normalize_object_types.py` only edits files already written by the collector. It does not start AI2-THOR. The path can be one episode folder, its `annotations/` directory, or any parent of episode folders. Run it after an episode export and before building cm-benchmark items.
 
 ```bash
-# 1. Propose categories. New names are appended with reviewed=no.
-#    Rows you already edited are left unchanged.
-python scripts/normalize_object_types.py --build-mapping "$OBJAVERSE_NAVIGATION_PATH" --split val
-
-# 2. Review configs/type_mapping.csv, then write obj-type and obj-category.
 python scripts/normalize_object_types.py --apply "$OBJAVERSE_NAVIGATION_PATH" --split val
 ```
 
-`--split` is required for annotation lookup when `episode_meta` has a house index but no split. The script does not guess the split. Without it, Objaverse names fall back to the text after `Obja` in the obj-id. The first apply copies each changed file to `<name>.orig.<ext>` and later runs read that copy, so editing the mapping and applying again is safe.
+Synset sources:
+
+- THOR types use `AI2THOR_OBJECT_TYPE_TO_WORDNET_SYNSET` (`Fridge` and an Objaverse refrigerator can share `refrigerator.n.01`).
+- Objaverse assets use `annotation["synset"]` for the house `assetId`.
+- If the house or the asset is missing, the name after `Obja` in the obj-id is the first wordnet2022 noun synset and the report source is `id_name`.
+
+`--split` is required for annotation lookup when `episode_meta` has a house index but no split. The script does not guess the split. The first apply copies each changed file to `<name>.orig.<ext>` and later runs read that copy. After writing, the script prints every object pair in the episode that has the same synset, a hypernym link in either direction (`is_hypernym_of`), or a shared direct hypernym.
 
 ## 6. Generate QA (legacy spatial templates)
 
-For **invisible displacement / survey** items, use `object_state`, `displacement_events`,
-`displacement_candidates`, and `world_layout` (see [docs/DATA_COLLECTION.md](docs/DATA_COLLECTION.md)).
+For **placement-trial / survey** items, use `placement_candidates-house_XXXXXX.csv`
+from `scripts/placement_trials.py` and `world_layout` (see [docs/DATA_COLLECTION.md](docs/DATA_COLLECTION.md)).
 
 ---
 
 ## 7. Code entry points
 
-| File | Role |
-|------|------|
-| `docs/DATA_COLLECTION.md` | Full design context for agents |
-| `docs/VISIBILITY_METRICS.md` | Formulas for nav visibility CSV columns |
-| `tasks/room_visit_task.py` | RoomVisit step loop, hidden relocation, layout, nav graph |
-| `collector.py` | CSV/JSON logging, visibility tracking, `nav_graph` export |
-| `utils/nav_graph_export.py` | Reachable-position nodes + grid-adjacency edges |
-| `scripts/summarize_episode_export.py` | One-episode nav/trajectory summary |
-| `scripts/normalize_object_types.py` | Post-export obj-type / obj-category (no simulator) |
-| `configs/type_mapping.csv` | Descriptive name → basic category |
-| `environment/spoc_objects.py` | `SPOCObject.get()` fix |
-| `requirements.txt` | Python deps (including Stretch AI2-THOR) |
-| `configure_variables.sh` | Dataset / navigation paths |
+
+| File                                  | Role                                                      |
+| ------------------------------------- | --------------------------------------------------------- |
+| `docs/DATA_COLLECTION.md`             | Full design context for agents                            |
+| `docs/VISIBILITY_METRICS.md`          | Formulas for nav visibility CSV columns                   |
+| `tasks/room_visit_task.py`            | RoomVisit step loop, layout, nav graph                    |
+| `scripts/placement_trials.py`         | Placement trials after RoomVisit navigation in the same command |
+| `collector.py`                        | CSV/JSON logging, visibility tracking, `nav_graph` export |
+| `utils/nav_graph_export.py`           | Reachable-position nodes + grid-adjacency edges           |
+| `scripts/summarize_episode_export.py` | One-episode nav/trajectory summary                        |
+| `scripts/normalize_object_types.py`   | Post-export obj-type / obj-synset (no simulator)          |
+| `environment/spoc_objects.py`         | `SPOCObject.get()` fix                                    |
+| `requirements.txt`                    | Python deps (including Stretch AI2-THOR)                  |
+| `configure_variables.sh`              | Dataset / navigation paths                                |
+
+

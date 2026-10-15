@@ -908,7 +908,9 @@ class StretchController:
 
     def get_objects_room_id_and_type(self, object_id: str) -> Tuple[str, str]:
         object_position = self.get_object_position(object_id)
-        room_id = get_room_id_from_location(self.room_poly_map, object_position)
+        room_id = get_room_id_from_location(
+            self.room_poly_map, object_position, verbose=False
+        )
         room_type_return = (
             self.room_type_dict[room_id] if room_id is not None else None
         )  # making it more robust to none style cases

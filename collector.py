@@ -1,6 +1,7 @@
 import os
 import json
 import datetime
+import subprocess
 
 import numpy as np
 import pandas as pd
@@ -16,12 +17,15 @@ from utils.constants.stretch_initialization_utils import (
     INTEL_CAMERA_HEIGHT,
     INTEL_VERTICAL_FOV,
     WRIST_ROTATION,
+    robot_action_by_name,
 )
 from utils.constants.object_constants import is_exportable_object
+from utils.object_labels import describe_object
 from utils.type_utils import THORActions
 
 from geometry import (
     DEFAULT_NAV_CAMERA_MOUNT_DEG,
+    aabb_bounds,
     angular_size_deg,
     box_center_size,
     camera_intrinsics,
@@ -31,7 +35,7 @@ from geometry import (
 
 
 class Collector:
-    """Logs navigation + cm-benchmark fields for invisible_displacement / survey.
+    """Logs navigation, placement trials, and survey fields.
 
     Hard-caps logging at ``max_steps`` (like an LLM context window): once that many
     timesteps are recorded, further ``collect_data`` calls are no-ops. Step buffers
@@ -53,7 +57,6 @@ class Collector:
         "doors",
         "object_state",
         "passage_state",
-        "displacement_debug",
     )
 
     def __init__(
@@ -61,17 +64,18 @@ class Collector:
         scene_name=None,
         episode_kind="invisible_displacement",
         environment="ai2thor",
-        max_displacements=10,
         max_steps=None,
         flush_every=50,
     ):
         self.dict_agent = {}
-        self.data_objects = {}  # objectId -> catalog tuple for objects-*.csv
+        self.data_objects = {}  # objectId -> catalog dict for objects-*.csv
+        self.house_index = None
+        self.house_split = None
+        self.move_distances_m = set()
+        self.rotation_angles_deg = set()
+        self.initial_door_states = []
         self.data_doors = []
         self.data_object_state = []
-        self.data_displacement_events = []
-        self.data_displacement_candidates = []
-        self.data_displacement_debug = []  # attempts / failures for diagnosing 0 displacements
         self.timestep = 0
         # ProcTHOR always reports sceneName="Procedural"; use house_index instead
         self.scene_name = scene_name if scene_name is not None else "unknown"
@@ -85,7 +89,6 @@ class Collector:
         self.annotations_dir = os.path.join(self.out_dir, "annotations")
         self.dict_colors = {}
         self.visited_rooms = set()
-        self.max_displacements = max_displacements
         # Context-window style cap: keep at most this many logged steps
         self.max_steps = max_steps
         self.flush_every = max(1, int(flush_every))
@@ -95,7 +98,6 @@ class Collector:
         self._save_reason = None
 
         self.tracked_objects = {}
-        self.displaced_object_ids = set()
         self.world_layout = None
         # AI2-THOR reachability graphs (independent of SPOC trajectory)
         self.nav_graphs = {}  # snapshot -> graph dict
@@ -129,10 +131,10 @@ class Collector:
         return tuple([np.round(number, n_round) for number in rounded_arr])
 
     def filter_export_detections(self, detections):
-        """Detections for CSV export: named, non-structural objects (any nav pixels).
+        """Detections for CSV export: non-structural objects, including numeric ids.
 
         Visibility thresholds are **not** applied — metrics go to CSV for post-processing.
-        Drops Wall/Floor/etc. and numeric-only ids like ``2|4``.
+        Drops Wall/Floor/Ceiling/Room. Ids such as ``6|5`` are kept.
         """
         if not detections:
             return {}
@@ -150,11 +152,10 @@ class Collector:
         return visible_pixels
 
     def get_object_data(self, arr_objects, event, include_detections=False):
-        """Collect named non-structural objects for navigation / objects CSV.
+        """Collect non-structural objects for navigation / objects CSV.
 
         Navigation rows are emitted **only** when the object has mask pixels in the
-        current nav frame (``visible-pixels > 0``) — same signal as displacement
-        image FOV. Hidden / tracked-only objects belong in ``object_state``, not
+        current nav frame (``visible-pixels > 0``). Hidden / tracked-only objects belong in ``object_state``, not
         navigation.
 
         Bbox metrics require ``include_detections=True`` and the nav ``event`` that
@@ -264,22 +265,30 @@ class Collector:
                 ang_height_deg = None
 
             # Catalog / objects-*.csv — 3D metadata (not segmentation).
+            label = describe_object(oid, obj_type, obj_dict.get("assetId"))
             center, size = box_center_size(aabb=aabb, oobb=oobb)
-            objects[oid] = (
-                obj_type,
-                oid,
-                tuple(color),
-                tuple(self.round_number(obj_dict["position"], 2)),
-                tuple(self.round_number(obj_dict["rotation"], 2)),
-                tuple(obj_dict["receptacleObjectIds"])
-                if obj_dict.get("receptacleObjectIds") is not None
-                else (),
-                tuple(self.round_number(center, 2)),
-                tuple(self.round_number(size, 2)),
-            )
+            aabb_min, aabb_max = aabb_bounds(aabb)
+            objects[oid] = {
+                "obj_type": label.obj_type,
+                "obj_id": oid,
+                "obj_synset": label.synset,
+                "asset_id": obj_dict.get("assetId") or "",
+                "color": tuple(color),
+                "position": tuple(self.round_number(obj_dict["position"], 2)),
+                "rotation": tuple(self.round_number(obj_dict["rotation"], 2)),
+                "receptacles": (
+                    tuple(obj_dict["receptacleObjectIds"])
+                    if obj_dict.get("receptacleObjectIds") is not None
+                    else ()
+                ),
+                "center": tuple(self.round_number(center, 2)),
+                "size": tuple(self.round_number(size, 2)),
+                "aabb_min": self._xyz(aabb_min),
+                "aabb_max": self._xyz(aabb_max),
+                "room_id": obj_dict.get("roomId"),
+            }
 
             dist = float(obj_dict.get("distance") or 0.0)
-            was_displaced = oid in self.displaced_object_ids
             cond_objs.append(
                 [
                     oid,
@@ -310,11 +319,15 @@ class Collector:
                     bbox_area,
                     min_side,
                     occupancy,
-                    was_displaced,
                 ]
             )
 
         return cond_objs, objects
+
+    def _xyz(self, point):
+        if not point:
+            return (None, None, None)
+        return tuple(self.round_number(point, 2))
 
     def save_data_by_axis(self, dict_data, base_name, array):
         axis_names = ["-x", "-y", "-z"]
@@ -363,7 +376,6 @@ class Collector:
             dict_navigation["bbox-area"].append(None)
             dict_navigation["min-side"].append(None)
             dict_navigation["occupancy-ratio"].append(None)
-            dict_navigation["displaced"].append(None)
             return
 
         for object_data in objects_data:
@@ -376,8 +388,8 @@ class Collector:
             self.save_bbox(dict_navigation, bbox)
             # Layout: [oid, dist, bbox, exp_area, ang_w, ang_h,
             #          exp_cmin, exp_cmax, exp_rmin, exp_rmax,
-            #          vis_px, area, min_side, occ, displaced]
-            if len(object_data) >= 15:
+            #          vis_px, area, min_side, occ]
+            if len(object_data) >= 14:
                 dict_navigation["expected-bbox-area"].append(object_data[3])
                 dict_navigation["ang-width-deg"].append(object_data[4])
                 dict_navigation["ang-height-deg"].append(object_data[5])
@@ -389,20 +401,6 @@ class Collector:
                 dict_navigation["bbox-area"].append(object_data[11])
                 dict_navigation["min-side"].append(object_data[12])
                 dict_navigation["occupancy-ratio"].append(object_data[13])
-                dict_navigation["displaced"].append(bool(object_data[14]))
-            elif len(object_data) >= 14:
-                dict_navigation["expected-bbox-area"].append(object_data[3])
-                dict_navigation["ang-width-deg"].append(object_data[4])
-                dict_navigation["ang-height-deg"].append(object_data[5])
-                dict_navigation["expected_cmin"].append(object_data[6])
-                dict_navigation["expected_cmax"].append(object_data[7])
-                dict_navigation["expected_rmin"].append(object_data[8])
-                dict_navigation["expected_rmax"].append(object_data[9])
-                dict_navigation["visible-pixels"].append(object_data[10])
-                dict_navigation["bbox-area"].append(object_data[11])
-                dict_navigation["min-side"].append(object_data[12])
-                dict_navigation["occupancy-ratio"].append(object_data[13])
-                dict_navigation["displaced"].append(None)
             else:
                 # Legacy shorter rows
                 dict_navigation["expected-bbox-area"].append(
@@ -428,7 +426,6 @@ class Collector:
                     dict_navigation["bbox-area"].append(None)
                     dict_navigation["min-side"].append(None)
                     dict_navigation["occupancy-ratio"].append(None)
-                dict_navigation["displaced"].append(None)
 
     def save_image(self, im_path, event):
         cv2.imwrite(im_path, event.cv2img)
@@ -473,7 +470,6 @@ class Collector:
             "bbox-area": [],
             "min-side": [],
             "occupancy-ratio": [],
-            "displaced": [],
             "path": [],
         }
         for key in self.dict_agent:
@@ -483,7 +479,10 @@ class Collector:
     def get_dict_objects(self):
         dict_objects = {
             "obj-type": [],
+            "obj-synset": [],
             "obj-id": [],
+            "assetId": [],
+            "room-id": [],
             "obj-color": [],
             "obj-pos-x": [],
             "obj-pos-y": [],
@@ -498,16 +497,27 @@ class Collector:
             "size-x": [],
             "size-y": [],
             "size-z": [],
+            "aabb-min-x": [],
+            "aabb-min-y": [],
+            "aabb-min-z": [],
+            "aabb-max-x": [],
+            "aabb-max-y": [],
+            "aabb-max-z": [],
         }
-        for t in self.data_objects.values():
-            dict_objects["obj-type"].append(t[0])
-            dict_objects["obj-id"].append(t[1])
-            dict_objects["obj-color"].append(t[2])
-            self.save_data_by_axis(dict_objects, "obj-pos", t[3])
-            self.save_data_by_axis(dict_objects, "obj-rot", t[4])
-            dict_objects["receptacleObjectIds"].append(t[5])
-            self.save_data_by_axis(dict_objects, "bBox-center", t[6])
-            self.save_data_by_axis(dict_objects, "size", t[7])
+        for row in self.data_objects.values():
+            dict_objects["obj-type"].append(row["obj_type"])
+            dict_objects["obj-synset"].append(row["obj_synset"])
+            dict_objects["obj-id"].append(row["obj_id"])
+            dict_objects["assetId"].append(row["asset_id"])
+            dict_objects["room-id"].append(row["room_id"])
+            dict_objects["obj-color"].append(row["color"])
+            self.save_data_by_axis(dict_objects, "obj-pos", row["position"])
+            self.save_data_by_axis(dict_objects, "obj-rot", row["rotation"])
+            dict_objects["receptacleObjectIds"].append(row["receptacles"])
+            self.save_data_by_axis(dict_objects, "bBox-center", row["center"])
+            self.save_data_by_axis(dict_objects, "size", row["size"])
+            self.save_data_by_axis(dict_objects, "aabb-min", row["aabb_min"])
+            self.save_data_by_axis(dict_objects, "aabb-max", row["aabb_max"])
         return dict_objects
 
     def get_dict_doors(self):
@@ -541,6 +551,7 @@ class Collector:
             "timestep": [],
             "obj-id": [],
             "obj-type": [],
+            "obj-synset": [],
             "obj-pos-x": [],
             "obj-pos-y": [],
             "obj-pos-z": [],
@@ -559,6 +570,7 @@ class Collector:
             cols["timestep"].append(entry["timestep"])
             cols["obj-id"].append(entry["obj_id"])
             cols["obj-type"].append(entry["obj_type"])
+            cols["obj-synset"].append(entry.get("obj_synset"))
             self.save_data_by_axis(cols, "obj-pos", entry["position"])
             self.save_data_by_axis(cols, "obj-rot", entry["rotation"])
             cols["visible"].append(entry["visible"])
@@ -570,48 +582,6 @@ class Collector:
             cols["distance_from_agent"].append(entry["distance_from_agent"])
         return cols
 
-    def get_dict_displacement_events(self):
-        cols = {
-            "event_id": [],
-            "obj-id": [],
-            "at_timestep": [],
-            "action": [],
-            "from_receptacle": [],
-            "to_receptacle": [],
-            "from_pos-x": [],
-            "from_pos-y": [],
-            "from_pos-z": [],
-            "to_pos-x": [],
-            "to_pos-y": [],
-            "to_pos-z": [],
-            "hidden_during": [],
-            "visible_just_before": [],
-            "visible_just_after": [],
-            "in_fov_just_before": [],
-            "in_fov_just_after": [],
-            "moved_via": [],
-            "swap_partner_id": [],
-            "notes": [],
-        }
-        for entry in self.data_displacement_events:
-            cols["event_id"].append(entry["event_id"])
-            cols["obj-id"].append(entry["obj_id"])
-            cols["at_timestep"].append(entry["at_timestep"])
-            cols["action"].append(entry["action"])
-            cols["from_receptacle"].append(entry["from_receptacle"])
-            cols["to_receptacle"].append(entry["to_receptacle"])
-            self.save_data_by_axis(cols, "from_pos", entry["from_pos"])
-            self.save_data_by_axis(cols, "to_pos", entry["to_pos"])
-            cols["hidden_during"].append(entry["hidden_during"])
-            cols["visible_just_before"].append(entry["visible_just_before"])
-            cols["visible_just_after"].append(entry["visible_just_after"])
-            cols["in_fov_just_before"].append(entry["in_fov_just_before"])
-            cols["in_fov_just_after"].append(entry["in_fov_just_after"])
-            cols["moved_via"].append(entry["moved_via"])
-            cols["swap_partner_id"].append(entry.get("swap_partner_id"))
-            cols["notes"].append(entry["notes"])
-        return cols
-
     def get_dict_passage_state(self):
         """Survey-oriented view of door open/closed state."""
         cols = {
@@ -619,7 +589,6 @@ class Collector:
             "passage_id": [],
             "obj-id": [],
             "is_open": [],
-            "is_locked": [],
             "from_region": [],
             "to_region": [],
         }
@@ -628,10 +597,29 @@ class Collector:
             cols["passage_id"].append(entry["door_id"])
             cols["obj-id"].append(entry["door_id"])
             cols["is_open"].append(entry["is_open"])
-            cols["is_locked"].append(None)
             cols["from_region"].append(entry["room0"])
             cols["to_region"].append(entry["room1"])
         return cols
+
+    def record_initial_doors(self, door_states):
+        """Store each door's open/closed state once. RoomVisit does not change doors."""
+        if self.initial_door_states:
+            return
+        self.initial_door_states = [dict(door) for door in door_states or []]
+        for door in self.initial_door_states:
+            self.data_doors.append(
+                {
+                    "timestep": 0,
+                    "door_id": door["door_id"],
+                    "room0": door["room0"],
+                    "room1": door["room1"],
+                    "openable": door["openable"],
+                    "is_open": door["is_open"],
+                    "openness": door["openness"],
+                    "position": door["position"],
+                    "distance": door["distance"],
+                }
+            )
 
     def update_visibility_tracking(self, in_image_pickupable_meta):
         """Track pickupables by **nav-image** presence (detections + mask pixels).
@@ -659,43 +647,7 @@ class Collector:
                 "last_visible_t": self.timestep,
                 "hidden_steps": 0,
                 "in_camera_fov": True,
-                "displaced": False,
-                "place_fail_count": 0,
             }
-
-    def eligible_for_displacement(self):
-        """All pickupables eligible to move (unsorted aside from fail-count priority)."""
-        eligible = []
-        for oid, track in self.tracked_objects.items():
-            if track["displaced"] or oid in self.displaced_object_ids:
-                continue
-            if track["hidden_steps"] < 2:
-                continue
-            if track.get("in_camera_fov"):
-                continue
-            if track["first_seen_t"] >= self.timestep:
-                continue
-            eligible.append(oid)
-        eligible.sort(
-            key=lambda oid: (
-                int(self.tracked_objects[oid].get("place_fail_count") or 0),
-                -int(self.tracked_objects[oid].get("hidden_steps") or 0),
-            )
-        )
-        return eligible
-
-    def candidates_for_displacement(self):
-        """Eligible pickupables, capped by remaining displacement budget."""
-        if len(self.displaced_object_ids) >= self.max_displacements:
-            return []
-        remaining = self.max_displacements - len(self.displaced_object_ids)
-        return self.eligible_for_displacement()[:remaining]
-
-    def note_place_failure(self, object_id: str):
-        """Bump fail count so another object is preferred next step."""
-        track = self.tracked_objects.get(object_id)
-        if track is not None:
-            track["place_fail_count"] = int(track.get("place_fail_count") or 0) + 1
 
     def log_object_state_row(self, timestep, obj_meta, in_camera_fov, receptacle_is_open=None):
         parents = obj_meta.get("parentReceptacles") or []
@@ -703,11 +655,15 @@ class Collector:
         pos = self.round_number(obj_meta["position"], 2)
         rot = self.round_number(obj_meta["rotation"], 2)
         dist = obj_meta.get("distance")
+        label = describe_object(
+            obj_meta["objectId"], obj_meta.get("objectType"), obj_meta.get("assetId")
+        )
         self.data_object_state.append(
             {
                 "timestep": timestep,
                 "obj_id": obj_meta["objectId"],
-                "obj_type": obj_meta["objectType"],
+                "obj_type": label.obj_type,
+                "obj_synset": label.synset,
                 "position": pos,
                 "rotation": rot,
                 "visible": bool(obj_meta.get("visible", False)),
@@ -719,93 +675,6 @@ class Collector:
                 "distance_from_agent": None if dist is None else float(np.round(dist, 4)),
             }
         )
-
-    def log_displacement_event(self, event):
-        self.data_displacement_events.append(event)
-        self.displaced_object_ids.add(event["obj_id"])
-        if event["obj_id"] in self.tracked_objects:
-            self.tracked_objects[event["obj_id"]]["displaced"] = True
-
-    def log_displacement_candidate(self, row):
-        """One distractor / chosen destination pose for cm-benchmark options."""
-        self.data_displacement_candidates.append(dict(row))
-
-    def get_dict_displacement_candidates(self):
-        cols = {
-            "event_id": [],
-            "obj-id": [],
-            "at_timestep": [],
-            "candidate_role": [],
-            "candidate_receptacle": [],
-            "candidate_pos-x": [],
-            "candidate_pos-y": [],
-            "candidate_pos-z": [],
-            "is_persisted": [],
-        }
-        for entry in self.data_displacement_candidates:
-            cols["event_id"].append(entry.get("event_id"))
-            cols["obj-id"].append(entry.get("obj_id"))
-            cols["at_timestep"].append(entry.get("at_timestep"))
-            cols["candidate_role"].append(entry.get("candidate_role"))
-            cols["candidate_receptacle"].append(entry.get("candidate_receptacle"))
-            pos = entry.get("candidate_pos")
-            if pos is None:
-                cols["candidate_pos-x"].append(None)
-                cols["candidate_pos-y"].append(None)
-                cols["candidate_pos-z"].append(None)
-            else:
-                self.save_data_by_axis(cols, "candidate_pos", pos)
-            cols["is_persisted"].append(bool(entry.get("is_persisted")))
-        return cols
-
-    def log_displacement_debug(self, entry, verbose=False):
-        """Record why a displacement attempt succeeded or failed."""
-        row = dict(entry)
-        row.setdefault("timestep", self.timestep)
-        self.data_displacement_debug.append(row)
-        # Avoid printing every step (freezes the terminal on long episodes)
-        if verbose or row.get("status") == "ok":
-            stage = row.get("stage", "?")
-            status = row.get("status", "?")
-            oid = row.get("obj_id", "")
-            detail = row.get("detail", "")
-            print(f"[displace] t={self.timestep} {status} stage={stage} obj={oid} {detail}")
-
-    def get_dict_displacement_debug(self):
-        cols = {
-            "timestep": [],
-            "obj_id": [],
-            "status": [],
-            "stage": [],
-            "detail": [],
-            "room_id": [],
-            "from_receptacle": [],
-            "to_receptacle": [],
-            "n_receptacles_room": [],
-            "n_receptacles_tried": [],
-            "n_skipped_same_parent": [],
-            "n_skipped_closed": [],
-            "n_spawn_empty": [],
-            "n_place_fail": [],
-            "last_error": [],
-        }
-        for entry in self.data_displacement_debug:
-            cols["timestep"].append(entry.get("timestep"))
-            cols["obj_id"].append(entry.get("obj_id"))
-            cols["status"].append(entry.get("status"))
-            cols["stage"].append(entry.get("stage"))
-            cols["detail"].append(entry.get("detail"))
-            cols["room_id"].append(entry.get("room_id"))
-            cols["from_receptacle"].append(entry.get("from_receptacle"))
-            cols["to_receptacle"].append(entry.get("to_receptacle"))
-            cols["n_receptacles_room"].append(entry.get("n_receptacles_room"))
-            cols["n_receptacles_tried"].append(entry.get("n_receptacles_tried"))
-            cols["n_skipped_same_parent"].append(entry.get("n_skipped_same_parent"))
-            cols["n_skipped_closed"].append(entry.get("n_skipped_closed"))
-            cols["n_spawn_empty"].append(entry.get("n_spawn_empty"))
-            cols["n_place_fail"].append(entry.get("n_place_fail"))
-            cols["last_error"].append(entry.get("last_error"))
-        return cols
 
     def set_world_layout(self, layout):
         self.world_layout = layout
@@ -854,9 +723,6 @@ class Collector:
         if self.data_object_state:
             self._append_table("object_state", self.get_dict_object_state())
             self.data_object_state.clear()
-        if self.data_displacement_debug:
-            self._append_table("displacement_debug", self.get_dict_displacement_debug())
-            self.data_displacement_debug.clear()
 
     def collect_data(
         self,
@@ -865,7 +731,6 @@ class Collector:
         v_objects,
         controller,
         room_info=None,
-        door_states=None,
         action_success=None,
         held_obj_id=None,
         object_states=None,
@@ -904,7 +769,8 @@ class Collector:
             self.dict_agent[key] = {"objects": []}
             self.dict_agent[key]["position"] = position
             self.dict_agent[key]["rotation"] = rotation
-            self.dict_agent[key]["degrees"] = AGENT_ROTATION_DEG
+            self._note_motion(action_name)
+            self.dict_agent[key]["degrees"] = self._rotation_degrees(action_name)
             self.dict_agent[key]["camera_horizon"] = camera_horizon
             self.dict_agent[key]["camera_position"] = camera_position
             self.dict_agent[key]["current_room"] = current_room
@@ -931,26 +797,10 @@ class Collector:
                 if prev is None:
                     self.data_objects[oid] = row
                     continue
-                prev_size = sum(abs(float(v)) for v in prev[7])
-                new_size = sum(abs(float(v)) for v in row[7])
+                prev_size = sum(abs(float(v or 0)) for v in prev["size"])
+                new_size = sum(abs(float(v or 0)) for v in row["size"])
                 if new_size >= prev_size:
                     self.data_objects[oid] = row
-
-            if door_states:
-                for door in door_states:
-                    self.data_doors.append(
-                        {
-                            "timestep": self.timestep,
-                            "door_id": door["door_id"],
-                            "room0": door["room0"],
-                            "room1": door["room1"],
-                            "openable": door["openable"],
-                            "is_open": door["is_open"],
-                            "openness": door["openness"],
-                            "position": door["position"],
-                            "distance": door["distance"],
-                        }
-                    )
 
             if object_states:
                 for row in object_states:
@@ -969,6 +819,74 @@ class Collector:
 
             if self.timestep % self.flush_every == 0:
                 self.flush_step_buffers()
+
+    def _locomotion_scalar(self, action_name: str, thor_action: str):
+        """Absolute move (m) or turn (deg) for this logged action, or None."""
+        spec = robot_action_by_name.get(action_name) or {}
+        scalar = None
+        if spec.get("action") == thor_action:
+            scalar = (spec.get("args") or {}).get("move_scalar")
+        if scalar is None:
+            return None
+        return abs(float(scalar))
+
+    def _note_motion(self, action_name: str) -> None:
+        move = self._locomotion_scalar(action_name, "MoveAgent")
+        if move is not None:
+            self.move_distances_m.add(move)
+        turn = self._locomotion_scalar(action_name, "RotateAgent")
+        if turn is not None:
+            self.rotation_angles_deg.add(turn)
+
+    def _rotation_degrees(self, action_name: str):
+        return self._locomotion_scalar(action_name, "RotateAgent")
+
+    def _git_commit(self) -> str:
+        root = os.path.dirname(os.path.abspath(__file__))
+        try:
+            commit = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=root,
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+            dirty = subprocess.check_output(
+                ["git", "status", "--porcelain"],
+                cwd=root,
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+        except Exception:
+            return ""
+        if dirty:
+            return f"{commit}-dirty"
+        return commit
+
+    def _motion_check(self) -> dict:
+        params = (self.nav_graphs.get("episode_start") or {}).get("params") or {}
+        grid = params.get("grid_size")
+        move = params.get("agent_move_m")
+        rotation = params.get("agent_rotation_deg")
+        moves = sorted(self.move_distances_m)
+        angles = sorted(self.rotation_angles_deg)
+        notes = []
+        if moves and move is not None and any(abs(value - float(move)) > 1e-6 for value in moves):
+            notes.append(f"move distances used {moves}; nav_graph agent_move_m is {move}")
+        if angles and rotation is not None and any(abs(value - float(rotation)) > 1e-6 for value in angles):
+            notes.append(
+                f"rotation angles used {angles}; nav_graph agent_rotation_deg is {rotation}"
+            )
+        if grid is not None and move is not None and abs(float(grid) - float(move) * 0.75) > 1e-4:
+            notes.append(f"grid_size {grid} is not 0.75 * agent_move_m {move}")
+        return {
+            "move_m_used": moves,
+            "rotation_deg_used": angles,
+            "nav_graph_grid_size": grid,
+            "nav_graph_agent_move_m": move,
+            "nav_graph_agent_rotation_deg": rotation,
+            "matches": not notes,
+            "report": "; ".join(notes),
+        }
 
     def save_data(self, reason="done"):
         """Finalize episode exports. Safe to call more than once (idempotent).
@@ -992,19 +910,12 @@ class Collector:
                     "doors": self.get_dict_doors,
                     "object_state": self.get_dict_object_state,
                     "passage_state": self.get_dict_passage_state,
-                    "displacement_debug": self.get_dict_displacement_debug,
                 }[table]()
                 pd.DataFrame(empty).to_csv(path, index=False)
                 self._csv_initialized.add(table)
 
         pd.DataFrame(self.get_dict_objects()).to_csv(
             self._csv_path("objects"), index=False
-        )
-        pd.DataFrame(self.get_dict_displacement_events()).to_csv(
-            self._csv_path("displacement_events"), index=False
-        )
-        pd.DataFrame(self.get_dict_displacement_candidates()).to_csv(
-            self._csv_path("displacement_candidates"), index=False
         )
 
         if self.world_layout is not None:
@@ -1029,20 +940,6 @@ class Collector:
             with open(self._json_path("nav_graph"), "w") as f:
                 json.dump(nav_export, f, indent=2)
 
-        fail_counts = {}
-        debug_path = self._csv_path("displacement_debug")
-        if os.path.exists(debug_path):
-            try:
-                debug_df = pd.read_csv(debug_path)
-                if len(debug_df) and "stage" in debug_df.columns:
-                    fail_counts = (
-                        debug_df[debug_df["status"] == "fail"]["stage"]
-                        .value_counts()
-                        .to_dict()
-                    )
-            except Exception:
-                fail_counts = {}
-
         meta = {
             "path_to_data": self.out_dir,
             "path_to_images": self.image_path,
@@ -1051,14 +948,23 @@ class Collector:
             "episode_kind": self.episode_kind,
             "environment": self.environment,
             "scene_id": self.scene_name,
+            "house_index": self.house_index,
+            "split": self.house_split,
+            "git_commit": self._git_commit(),
+            "config": {
+                "movement_m": AGENT_MOVEMENT_CONSTANT,
+                "rotation_deg": AGENT_ROTATION_DEG,
+                "small_rotation_deg": AGENT_ROTATION_DEG / 5,
+                "reachability_grid_size": AGENT_MOVEMENT_CONSTANT * 0.75,
+                "horizon_deg": HORIZON,
+                "fov_stride": self.fov_stride,
+                "max_steps": self.max_steps,
+            },
             "num_timesteps": self.timestep,
             "max_steps": self.max_steps,
             "truncated": self._truncated or self.at_capacity,
             "save_reason": reason,
-            "num_displacements": len(self.data_displacement_events),
-            "num_displacement_candidates": len(self.data_displacement_candidates),
             "num_tracked_objects": len(self.tracked_objects),
-            "displacement_fail_stages": fail_counts,
             "fov_stride": self.fov_stride,
             "camera": {
                 "width": self.FRAME_WIDTH,
@@ -1094,19 +1000,23 @@ class Collector:
             },
             "visibility_filters": {
                 "note": (
-                    "navigation/objects CSV: named non-structural objects with "
-                    "nav mask pixels > 0 only (drops Wall/Floor, numeric-only ids, "
-                    "and hidden tracked pickupables). "
-                    "Displacement / object_state.in_camera_fov: same mask-pixel "
-                    "signal on synthesis strides; object_state.visible is THOR metadata."
+                    "navigation/objects CSV: non-structural objects with "
+                    "nav mask pixels > 0. Numeric ids such as 6|5 are kept. "
+                    "Wall/Floor/Ceiling/Room are dropped. "
+                    "object_state.in_camera_fov uses the same mask-pixel signal "
+                    "on synthesis strides; object_state.visible is THOR metadata."
                 ),
             },
+            "motion": self._motion_check(),
         }
         with open(self._json_path("episode_meta"), "w") as f:
             json.dump(meta, f, indent=2)
 
         self._saved = True
+        motion = meta["motion"]
         print(
             f"[collector] saved episode ({reason}) timesteps={self.timestep} "
             f"dir={self.out_dir} (images/ + annotations/)"
         )
+        if motion["report"]:
+            print(f"[collector] nav_graph params differ from motion used: {motion['report']}")

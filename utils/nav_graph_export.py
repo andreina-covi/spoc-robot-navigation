@@ -153,9 +153,9 @@ def build_nav_graph_from_reachable_positions(
         "Nodes from AI2-THOR GetReachablePositions. Edges are grid-adjacency on that "
         f"sample ({connectivity}-connected), NOT Euclidean k-NN and NOT the SPOC "
         "trajectory. SPOC actions use agent_move_m / agent_rotation_deg and may "
-        "fail, detour, or backtrack; see navigation-*.csv. Door openness over the "
-        "rollout is in doors-*.csv / passage_state-*.csv; object moves that may "
-        "change navigability later are in displacement_events-*.csv."
+        "fail, detour, or backtrack; see navigation-*.csv. Door open/closed "
+        "state is recorded once at episode start in doors-*.csv and "
+        "passage_state-*.csv. RoomVisit does not open or close doors."
     )
     if extra_notes:
         notes = notes + " " + extra_notes

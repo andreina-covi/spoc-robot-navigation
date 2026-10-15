@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
-"""Fill descriptive object types and basic categories on exported episodes.
+"""Fill descriptive object types and WordNet synsets on exported episodes.
 
 Reads annotation files already written by the collector. Does not start
 AI2-THOR or an agent.
 
-Modes
------
---build-mapping PATH
-    Scan episodes, resolve descriptive names, and append new names to
-    configs/type_mapping.csv with reviewed=no. Existing rows are kept.
-
 --apply PATH
-    Write obj-type and obj-category into annotation files. Stops if any
-    descriptive name is missing from the mapping.
+    Write obj-type and obj-synset. THOR types use
+    AI2THOR_OBJECT_TYPE_TO_WORDNET_SYNSET. Objaverse assets use
+    annotation["synset"]. If the asset cannot be resolved, the name after
+    "Obja" in the obj-id is looked up as the first wordnet2022 noun synset
+    and the report source is id_name.
 
 The episode metadata often has a house index (scene_id house_001030) but no
 split. This script does not guess the split. Pass --split val (or train/test)
@@ -29,99 +26,47 @@ import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from utils.constants.objaverse_data_dirs import OBJAVERSE_HOUSES_DIR  # noqa: E402
-from utils.objaverse_annotation import get_objaverse_annotations  # noqa: E402
+from nltk.corpus import wordnet2022 as wn  # noqa: E402
 
-DEFAULT_MAPPING = REPO_ROOT / "configs" / "type_mapping.csv"
-MAPPING_FIELDS = ["obj_type", "obj_category", "rule", "reviewed"]
+from utils.constants.objaverse_data_dirs import OBJAVERSE_HOUSES_DIR  # noqa: E402
+from utils.object_labels import (  # noqa: E402
+    describe_object,
+    is_id_placeholder,
+    is_undefined,
+)
+from utils.synset_utils import is_hypernym_of  # noqa: E402
+
 REPORT_NAME = "type_normalization_report.csv"
 REPORT_FIELDS = [
     "obj-id",
     "original obj-type",
     "new obj-type",
-    "obj-category",
+    "obj-synset",
     "source",
 ]
 
 TYPE_COLUMNS = ("obj-type", "objectType", "obj_type")
 ID_COLUMNS = ("obj-id", "objectId", "obj_id", "landmark_id")
-CATEGORY_COLUMN = "obj-category"
+SYNSET_COLUMN = "obj-synset"
+# Dropped when rewriting files that an earlier run marked with a category.
+_RETIRED_COLUMNS = ("obj-category",)
 SPLIT_KEYS = ("split", "house_split", "dataset_split")
 HOUSE_INDEX_KEYS = ("house_index", "houseIndex")
 HOUSE_SPLITS = ("train", "val", "test")
-
-# Last word is not a useful basic category, or a single token is a more
-# specific kind of a shared category. Applied only when a name is first added.
-BUILTIN_OVERRIDES = {
-    "ArmChair": "Chair",
-    "Armchair": "Chair",
-    "CounterTop": "CounterTop",
-    "GarbageCan": "GarbageCan",
-    "ShelvingUnit": "ShelvingUnit",
-    "TVStand": "TVStand",
-}
-
-_CAMEL = re.compile(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|[0-9]+")
-_UNDEFINED = {"", "undefined", "none", "nan", "null"}
-
 
 @dataclass
 class ObjectResolution:
     obj_id: str
     original_type: str
     descriptive: str
-    category: str
+    synset: str
     source: str  # thor_type | objaverse_annotation | id_name
-
-
-def is_undefined(value: Any) -> bool:
-    if value is None:
-        return True
-    return str(value).strip().lower() in _UNDEFINED
-
-
-def is_id_placeholder(obj_id: str, value: Any) -> bool:
-    """object_state stores the Objaverse id head when THOR type is Undefined."""
-    if is_undefined(value):
-        return False
-    head = str(obj_id).split("|", 1)[0]
-    return head.startswith("Obja") and len(head) > 4 and str(value).strip() == head
-
-
-def lemma_to_camel(lemma: str) -> str:
-    parts = re.split(r"[\s_\-]+", lemma.strip())
-    return "".join(part[:1].upper() + part[1:] for part in parts if part)
-
-
-def split_camel(name: str) -> List[str]:
-    return _CAMEL.findall(name or "")
-
-
-def last_word_category(name: str) -> str:
-    parts = split_camel(name)
-    if not parts:
-        return name
-    word = parts[-1]
-    return word[:1].upper() + word[1:]
-
-
-def proposed_category(name: str) -> Tuple[str, str]:
-    if name in BUILTIN_OVERRIDES:
-        return BUILTIN_OVERRIDES[name], "override"
-    return last_word_category(name), "last_word"
-
-
-def name_from_obj_id(obj_id: str) -> str:
-    head = str(obj_id).split("|", 1)[0]
-    if head.startswith("Obja") and len(head) > 4:
-        return head[4:]
-    return head
 
 
 def parse_house_index(scene_id: str) -> Optional[int]:
@@ -385,7 +330,6 @@ def resolve_objects(
     house_index: Optional[int],
     split: Optional[str],
     houses: HouseIndex,
-    annotations: Optional[Dict[str, Any]],
     identity_note: str,
 ) -> List[ObjectResolution]:
     by_id: Dict[str, List[str]] = {}
@@ -409,14 +353,18 @@ def resolve_objects(
             for value in types
             if not is_undefined(value) and not is_id_placeholder(obj_id, value)
         ]
+        asset_id = "" if lookup_note else asset_map.get(obj_id, "")
         if real:
             descriptive = str(real[0])
+            label = describe_object(obj_id, descriptive, asset_id)
             source = "thor_type"
             original = descriptive
+            synset = label.synset
         else:
-            descriptive, source = _descriptive_for_undefined(
-                obj_id, asset_map, annotations, lookup_note
-            )
+            label = describe_object(obj_id, "Undefined", asset_id)
+            descriptive = label.obj_type
+            source = label.source
+            synset = label.synset
             original = "Undefined" if any(is_undefined(value) for value in types) else (
                 str(types[0]) if types else ""
             )
@@ -425,87 +373,17 @@ def resolve_objects(
                 obj_id=obj_id,
                 original_type=original,
                 descriptive=descriptive,
-                category="",
+                synset=synset,
                 source=source,
             )
         )
     return resolved
 
 
-def _descriptive_for_undefined(
-    obj_id: str,
-    asset_map: Dict[str, str],
-    annotations: Optional[Dict[str, Any]],
-    lookup_note: str,
-) -> Tuple[str, str]:
-    if lookup_note or not asset_map:
-        return name_from_obj_id(obj_id), "id_name"
-    asset_id = asset_map.get(obj_id)
-    if not asset_id or annotations is None or asset_id not in annotations:
-        return name_from_obj_id(obj_id), "id_name"
-    lemma = annotations[asset_id].get("most_specific_lemma") or ""
-    camel = lemma_to_camel(str(lemma))
-    if not camel:
-        return name_from_obj_id(obj_id), "id_name"
-    return camel, "objaverse_annotation"
-
-
-def load_mapping(path: Path) -> Dict[str, Dict[str, str]]:
-    if not path.exists():
-        return {}
-    with path.open(newline="") as handle:
-        reader = csv.DictReader(handle)
-        rows = {}
-        for row in reader:
-            name = (row.get("obj_type") or "").strip()
-            if name:
-                rows[name] = {field: row.get(field, "") for field in MAPPING_FIELDS}
-        return rows
-
-
-def write_mapping(path: Path, rows: Dict[str, Dict[str, str]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=MAPPING_FIELDS)
-        writer.writeheader()
-        for name in sorted(rows):
-            writer.writerow(rows[name])
-
-
-def build_mapping(episodes: Sequence[Path], mapping_path: Path, split_arg: Optional[str]) -> int:
-    existing = load_mapping(mapping_path)
-    houses = HouseIndex(OBJAVERSE_HOUSES_DIR)
-    annotations = None
-    added = 0
-    for episode in episodes:
-        resolved, note = resolve_episode(episode, houses, annotations, split_arg, need_annotations=True)
-        if annotations is None and any(item.source == "objaverse_annotation" for item in resolved):
-            annotations = get_objaverse_annotations()
-        # resolve_episode loads annotations itself when needed
-        for item in resolved:
-            if item.descriptive in existing:
-                continue
-            category, rule = proposed_category(item.descriptive)
-            existing[item.descriptive] = {
-                "obj_type": item.descriptive,
-                "obj_category": category,
-                "rule": rule,
-                "reviewed": "no",
-            }
-            added += 1
-        if note:
-            print(f"{episode.name}: {note}")
-    write_mapping(mapping_path, existing)
-    print(f"Added {added} names to {mapping_path}")
-    return added
-
-
 def resolve_episode(
     episode: Path,
     houses: HouseIndex,
-    annotations: Optional[Dict[str, Any]],
     split_arg: Optional[str],
-    need_annotations: bool,
 ) -> Tuple[List[ObjectResolution], str]:
     ann = episode / "annotations"
     house_index, meta_split, note = episode_house_identity(ann)
@@ -515,14 +393,8 @@ def resolve_episode(
     elif meta_split is None and not split_arg:
         note = note or "split not in episode metadata"
     pairs = collect_object_pairs(ann)
-    wants_annotation = any(
-        is_undefined(obj_type) or is_id_placeholder(obj_id, obj_type)
-        for obj_id, obj_type in pairs
-    )
-    if wants_annotation and need_annotations and annotations is None and split and house_index is not None:
-        annotations = get_objaverse_annotations()
     resolved = resolve_objects(
-        pairs, house_index, split, houses, annotations, note if not split or house_index is None else ""
+        pairs, house_index, split, houses, note if not split or house_index is None else ""
     )
     if not split or house_index is None:
         # resolve_objects already used id_name; keep the note for the log
@@ -530,37 +402,14 @@ def resolve_episode(
     return resolved, ""
 
 
-def apply_mapping(
-    episodes: Sequence[Path], mapping_path: Path, split_arg: Optional[str]
-) -> None:
-    mapping = load_mapping(mapping_path)
-    if not mapping:
-        raise SystemExit(f"Mapping file is empty or missing: {mapping_path}")
+def apply_episodes(episodes: Sequence[Path], split_arg: Optional[str]) -> None:
     houses = HouseIndex(OBJAVERSE_HOUSES_DIR)
-    annotations = get_objaverse_annotations()
-    prepared = []
-    missing = set()
     for episode in episodes:
-        resolved, note = resolve_episode(
-            episode, houses, annotations, split_arg, need_annotations=False
-        )
+        resolved, note = resolve_episode(episode, houses, split_arg)
         if note:
             print(f"{episode.name}: {note}")
-        for item in resolved:
-            row = mapping.get(item.descriptive)
-            if row is None or not (row.get("obj_category") or "").strip():
-                missing.add(item.descriptive)
-            else:
-                item.category = row["obj_category"]
-        prepared.append((episode, resolved))
-    if missing:
-        print("Missing descriptive names in the mapping. No files were changed:")
-        for name in sorted(missing):
-            print(f"  {name}")
-        raise SystemExit(1)
-
-    for episode, resolved in prepared:
         write_episode(episode, resolved)
+        print_confusable(episode, resolved)
 
 
 def write_episode(episode: Path, resolved: Sequence[ObjectResolution]) -> None:
@@ -584,7 +433,7 @@ def write_episode(episode: Path, resolved: Sequence[ObjectResolution]) -> None:
                     "obj-id": item.obj_id,
                     "original obj-type": item.original_type,
                     "new obj-type": item.descriptive,
-                    "obj-category": item.category,
+                    "obj-synset": item.synset,
                     "source": item.source,
                 }
             )
@@ -605,15 +454,15 @@ def apply_csv(path: Path, by_id: Dict[str, ObjectResolution]) -> List[str]:
         return []
     original_ids = [(row.get(id_col) or "") for row in rows]
     original_count = len(rows)
-    out_fields = _insert_category_column(fieldnames, type_col)
+    out_fields = _insert_synset_column(fieldnames, type_col)
     for row in rows:
         obj_id = (row.get(id_col) or "").strip()
         item = by_id.get(obj_id)
         if item is None:
-            row.setdefault(CATEGORY_COLUMN, "")
+            row.setdefault(SYNSET_COLUMN, "")
             continue
         row[type_col] = item.descriptive
-        row[CATEGORY_COLUMN] = item.category
+        row[SYNSET_COLUMN] = item.synset
     backup_once(path)
     with path.open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=out_fields, extrasaction="ignore")
@@ -621,7 +470,7 @@ def apply_csv(path: Path, by_id: Dict[str, ObjectResolution]) -> List[str]:
         for row in rows:
             writer.writerow({key: row.get(key, "") for key in out_fields})
     _assert_ids_unchanged(path, id_col, original_ids, original_count)
-    return [type_col, CATEGORY_COLUMN]
+    return [type_col, SYNSET_COLUMN]
 
 
 def apply_json(path: Path, by_id: Dict[str, ObjectResolution]) -> List[str]:
@@ -683,23 +532,24 @@ def _update_json(node: Any, by_id: Dict[str, ObjectResolution], fields: List[str
         node[type_key] = item.descriptive
         rebuilt: Dict[str, Any] = {}
         for key, value in node.items():
-            if key == CATEGORY_COLUMN:
+            if key == SYNSET_COLUMN or key in _RETIRED_COLUMNS:
                 continue
             rebuilt[key] = value
             if key == type_key:
-                rebuilt[CATEGORY_COLUMN] = item.category
+                rebuilt[SYNSET_COLUMN] = item.synset
         node.clear()
         node.update(rebuilt)
-        fields.extend([type_key, CATEGORY_COLUMN])
+        fields.extend([type_key, SYNSET_COLUMN])
     elif isinstance(node, list):
         for value in node:
             _update_json(value, by_id, fields)
 
 
-def _insert_category_column(fieldnames: Sequence[str], type_col: str) -> List[str]:
-    fields = [name for name in fieldnames if name != CATEGORY_COLUMN]
+def _insert_synset_column(fieldnames: Sequence[str], type_col: str) -> List[str]:
+    drop = {SYNSET_COLUMN, *_RETIRED_COLUMNS}
+    fields = [name for name in fieldnames if name not in drop]
     index = fields.index(type_col) + 1
-    fields.insert(index, CATEGORY_COLUMN)
+    fields.insert(index, SYNSET_COLUMN)
     return fields
 
 
@@ -722,7 +572,7 @@ def read_csv_rows_written(path: Path) -> Tuple[List[str], List[Dict[str, str]]]:
 
 def verify_episode(annotations: Path, by_id: Dict[str, ObjectResolution]) -> None:
     undefined = []
-    missing_category = []
+    missing_synset = []
     for path in annotation_files(annotations):
         if path.suffix.lower() != ".csv":
             continue
@@ -731,11 +581,13 @@ def verify_episode(annotations: Path, by_id: Dict[str, ObjectResolution]) -> Non
         id_col = _id_column(fieldnames)
         if not type_col or not id_col:
             continue
-        if CATEGORY_COLUMN not in fieldnames:
-            raise RuntimeError(f"{path.name}: missing {CATEGORY_COLUMN}")
+        if SYNSET_COLUMN not in fieldnames:
+            raise RuntimeError(f"{path.name}: missing {SYNSET_COLUMN}")
+        if "obj-category" in fieldnames:
+            raise RuntimeError(f"{path.name}: obj-category is still present")
         type_index = fieldnames.index(type_col)
-        if fieldnames[type_index + 1] != CATEGORY_COLUMN:
-            raise RuntimeError(f"{path.name}: {CATEGORY_COLUMN} is not next to {type_col}")
+        if fieldnames[type_index + 1] != SYNSET_COLUMN:
+            raise RuntimeError(f"{path.name}: {SYNSET_COLUMN} is not next to {type_col}")
         backup = orig_path(path)
         if backup.exists():
             _, orig_rows = _read_exact(backup)
@@ -751,12 +603,16 @@ def verify_episode(annotations: Path, by_id: Dict[str, ObjectResolution]) -> Non
                 continue
             if is_undefined(row.get(type_col)):
                 undefined.append(obj_id)
-            if is_undefined(row.get(CATEGORY_COLUMN)):
-                missing_category.append(obj_id)
-    if undefined or missing_category:
+            if is_undefined(row.get(SYNSET_COLUMN)):
+                missing_synset.append(obj_id)
+    if undefined:
         raise RuntimeError(
-            f"{annotations}: undefined={sorted(set(undefined))[:10]} "
-            f"missing_category={sorted(set(missing_category))[:10]}"
+            f"{annotations}: undefined={sorted(set(undefined))[:10]}"
+        )
+    if missing_synset:
+        print(
+            f"  no synset for {len(set(missing_synset))} object(s): "
+            + ", ".join(sorted(set(missing_synset))[:12])
         )
 
 
@@ -766,42 +622,70 @@ def _read_exact(path: Path) -> Tuple[List[str], List[Dict[str, str]]]:
         return list(reader.fieldnames or []), list(reader)
 
 
-def print_sample(episodes: Sequence[Path], limit: int = 20) -> None:
-    printed = 0
-    print("obj-id\toriginal type\tnew obj-type\tobj-category\tsource")
-    for episode in episodes:
-        report = episode / "annotations" / REPORT_NAME
-        if not report.exists():
-            continue
-        with report.open(newline="") as handle:
-            for row in csv.DictReader(handle):
-                print(
-                    "\t".join(
-                        [
-                            row["obj-id"],
-                            row["original obj-type"],
-                            row["new obj-type"],
-                            row["obj-category"],
-                            row["source"],
-                        ]
-                    )
-                )
-                printed += 1
-                if printed >= limit:
-                    return
+def _direct_hypernyms(synset_name: str) -> Set[str]:
+    try:
+        return {hypernym.name() for hypernym in wn.synset(synset_name).hypernyms()}
+    except Exception:
+        return set()
+
+
+def _hypernym_either_way(left: str, right: str) -> bool:
+    try:
+        return is_hypernym_of(left, right) or is_hypernym_of(right, left)
+    except Exception:
+        return False
+
+
+def confusable_pairs(
+    resolved: Sequence[ObjectResolution],
+) -> List[Tuple[ObjectResolution, ObjectResolution, str]]:
+    """Pairs with the same synset, a hypernym link, or a shared direct hypernym."""
+    items = [item for item in resolved if item.synset]
+    parents: Dict[str, Set[str]] = {}
+    pairs: List[Tuple[ObjectResolution, ObjectResolution, str]] = []
+    for index, left in enumerate(items):
+        for right in items[index + 1 :]:
+            if left.synset == right.synset:
+                reason = "same_synset"
+            elif _hypernym_either_way(left.synset, right.synset):
+                reason = "hypernym"
+            else:
+                if left.synset not in parents:
+                    parents[left.synset] = _direct_hypernyms(left.synset)
+                if right.synset not in parents:
+                    parents[right.synset] = _direct_hypernyms(right.synset)
+                if not (parents[left.synset] & parents[right.synset]):
+                    continue
+                reason = "shared_direct_hypernym"
+            pairs.append((left, right, reason))
+    return pairs
+
+
+def print_confusable(episode: Path, resolved: Sequence[ObjectResolution]) -> None:
+    pairs = confusable_pairs(resolved)
+    print(f"confusable pairs in {episode.name}: {len(pairs)}")
+    print(
+        "obj-id-a\tobj-type-a\tobj-synset-a\tobj-id-b\tobj-type-b\tobj-synset-b\treason"
+    )
+    for left, right, reason in pairs:
+        print(
+            "\t".join(
+                [
+                    left.obj_id,
+                    left.descriptive,
+                    left.synset,
+                    right.obj_id,
+                    right.descriptive,
+                    right.synset,
+                    reason,
+                ]
+            )
+        )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--build-mapping", type=Path, metavar="PATH")
-    mode.add_argument("--apply", type=Path, metavar="PATH")
-    parser.add_argument(
-        "--mapping",
-        type=Path,
-        default=DEFAULT_MAPPING,
-        help="Category table (default: configs/type_mapping.csv)",
-    )
+    parser.add_argument("--apply", type=Path, required=True, metavar="PATH")
     parser.add_argument(
         "--split",
         choices=HOUSE_SPLITS,
@@ -809,14 +693,9 @@ def main() -> None:
         "Omit it to keep Objaverse names taken from the obj-id.",
     )
     args = parser.parse_args()
-    target = args.build_mapping or args.apply
-    episodes = find_episodes(target)
+    episodes = find_episodes(args.apply)
     print(f"{len(episodes)} episode(s)")
-    if args.build_mapping:
-        build_mapping(episodes, args.mapping, args.split)
-        return
-    apply_mapping(episodes, args.mapping, args.split)
-    print_sample(episodes, limit=20)
+    apply_episodes(episodes, args.split)
 
 
 if __name__ == "__main__":

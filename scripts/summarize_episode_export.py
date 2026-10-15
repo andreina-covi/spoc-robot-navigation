@@ -110,7 +110,6 @@ def summarize(run_dir: str, scene: Optional[str] = None) -> Dict[str, Any]:
         "reachability_params": start.get("params") or end.get("params"),
         "trajectory_vs_reachability": nearest_ok,
         "save_reason": meta.get("save_reason"),
-        "num_displacements": meta.get("num_displacements"),
     }
     return out
 
