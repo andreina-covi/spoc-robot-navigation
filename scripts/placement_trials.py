@@ -3,13 +3,14 @@
 
 Loads one house into AI2-THOR. For each pickupable, places it once on:
 
-- the closest floor spawn within the landmark radius, one point per landmark
-  in that room
+- the closest floor spawn within the given radius of each landmark in that room
 - the 5 most salient non-openable receptacles in that room
 
-Each anchor uses one spawn coordinate, cached for the house. The object is
-restored only when the place succeeds. Writes
-``placement_candidates-house_XXXXXX.csv``.
+Landmarks are non-pickupable, non-structural objects, largest box first.
+Objaverse instances are included by that rule. Each anchor uses one spawn
+coordinate, cached for the house. The object is restored only when the place
+succeeds. A failed restore reloads the house before the next pickupable.
+Writes ``placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv``.
 
 The RoomVisit command already has these house indexes on its eval samples.
 After the agent finishes, it passes that list to ``run``.
@@ -38,11 +39,10 @@ from utils.constants.objaverse_data_dirs import (  # noqa: E402
 )
 from utils.constants.stretch_initialization_utils import STRETCH_ENV_ARGS  # noqa: E402
 from utils.placement_anchors import (  # noqa: E402
-    FLOOR_ANCHOR_RADIUS_M,
     TOP_RECEPTACLES,
     floor_anchor_points,
-    is_landmark_object,
     room_id_at,
+    salient_landmarks,
     salient_receptacles,
     xyz_dict,
 )
@@ -60,6 +60,11 @@ CSV_FIELDS = (
 
 def house_name(house_index: int) -> str:
     return f"house_{int(house_index):06d}"
+
+
+def candidates_name(house_index: int, split: str, radius_m: float) -> str:
+    radius = format(float(radius_m), "g")
+    return f"placement_candidates-{house_name(house_index)}-{split}-radius_{radius}.csv"
 
 
 def houses_from_samples(samples) -> Dict[str, List[int]]:
@@ -91,23 +96,22 @@ def load_house(split: str, house_index: int, houses_dir: Path) -> dict:
     raise IndexError(f"{path} has no house at line index {house_index}")
 
 
-def landmarks_from_house(house: dict, room_poly_map) -> List[dict]:
-    landmarks = []
-    for obj in house.get("objects") or []:
-        obj_type = obj.get("objectType") or (obj.get("assetId") or "").split("_")[0]
-        if not is_landmark_object(obj_type, obj.get("assetId") or obj.get("id") or ""):
+def landmark_points(objects, room_id) -> List[dict]:
+    """Floor-anchor landmarks in one room, largest box first."""
+    points = []
+    for obj in salient_landmarks(objects, room_id):
+        oid = obj.get("objectId") or obj.get("id")
+        position = obj.get("position")
+        if not oid or not position:
             continue
-        if not obj.get("id") or not obj.get("position"):
-            continue
-        landmarks.append(
+        points.append(
             {
-                "landmark_id": obj["id"],
-                "obj-type": obj_type,
-                "position": obj["position"],
-                "region_id": room_id_at(room_poly_map, obj["position"]),
+                "landmark_id": oid,
+                "obj-type": obj.get("objectType"),
+                "position": position,
             }
         )
-    return landmarks
+    return points
 
 
 class SpawnCache:
@@ -163,17 +167,20 @@ def resolved_position(controller: StretchController, object_id: str, fallback):
 
 
 def trial_anchor(controller, object_id, anchor_id, anchor_kind, target, origin, origin_rot):
-    """One place. Restore only when that place succeeds."""
+    """One place. Restore only when that place succeeds.
+
+    Returns the CSV row and whether the object is back at its original pose.
+    """
     if target is None:
-        return row(object_id, anchor_id, anchor_kind, None, False)
+        return row(object_id, anchor_id, anchor_kind, None, False), True
     ok = place_at(controller, object_id, target)
     if not ok:
-        return row(object_id, anchor_id, anchor_kind, None, False)
+        return row(object_id, anchor_id, anchor_kind, None, False), True
     pose = resolved_position(controller, object_id, target)
     restored = place_at(controller, object_id, origin, origin_rot)
     if not restored:
         print(f"[placement] restore failed obj={object_id} anchor={anchor_id}")
-    return row(object_id, anchor_id, anchor_kind, pose, True)
+    return row(object_id, anchor_id, anchor_kind, pose, True), restored
 
 
 def row(object_id, anchor_id, anchor_kind, pose, success) -> dict:
@@ -217,7 +224,6 @@ def floor_spawns(cache: SpawnCache, objects, room_id) -> list:
 
 def trials_for_house(controller, house, radius_m, top_n) -> List[dict]:
     objects = scene_objects(controller)
-    landmarks = landmarks_from_house(house, controller.room_poly_map)
     cache = SpawnCache(controller)
     floor_by_room: Dict[Any, list] = {}
     rows = []
@@ -232,17 +238,20 @@ def trials_for_house(controller, house, radius_m, top_n) -> List[dict]:
         origin_rot = obj.get("rotation")
         if room_id not in floor_by_room:
             floor_by_room[room_id] = floor_spawns(cache, objects, room_id)
-        room_landmarks = [
-            landmark for landmark in landmarks if landmark.get("region_id") == room_id
-        ]
-        for anchor_id, point in floor_anchor_points(room_landmarks, floor_by_room[room_id], radius_m):
-            rows.append(
-                trial_anchor(controller, oid, anchor_id, "floor", point, origin, origin_rot)
+        restore_ok = True
+        for anchor_id, point in floor_anchor_points(
+            landmark_points(objects, room_id), floor_by_room[room_id], radius_m
+        ):
+            result, restore_ok = trial_anchor(
+                controller, oid, anchor_id, "floor", point, origin, origin_rot
             )
-        for rec in salient_receptacles(objects, room_id, limit=top_n):
-            rid = rec.get("objectId") or rec.get("id")
-            rows.append(
-                trial_anchor(
+            rows.append(result)
+            if not restore_ok:
+                break
+        if restore_ok:
+            for rec in salient_receptacles(objects, room_id, limit=top_n):
+                rid = rec.get("objectId") or rec.get("id")
+                result, restore_ok = trial_anchor(
                     controller,
                     oid,
                     rid,
@@ -251,7 +260,15 @@ def trials_for_house(controller, house, radius_m, top_n) -> List[dict]:
                     origin,
                     origin_rot,
                 )
-            )
+                rows.append(result)
+                if not restore_ok:
+                    break
+        if not restore_ok:
+            print(f"[placement] resetting house before the next object after {oid}")
+            controller.reset(house)
+            objects = scene_objects(controller)
+            cache = SpawnCache(controller)
+            floor_by_room = {}
     return rows
 
 
@@ -282,7 +299,7 @@ def run(split: str, house_indices: List[int], output_dir: Path, radius_m: float,
             print(f"[placement] loading {name}")
             controller.reset(house)
             rows = trials_for_house(controller, house, radius_m, top_n)
-            path = output_dir / f"placement_candidates-{name}.csv"
+            path = output_dir / candidates_name(index, split, radius_m)
             write_csv(path, rows)
             ok = sum(1 for item in rows if item["success"])
             print(f"[placement] wrote {path} rows={len(rows)} success={ok}")
@@ -297,10 +314,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--output",
         default=None,
-        help="Directory for placement_candidates-house_XXXXXX.csv. "
+        help="Directory for placement candidate CSVs. "
         "Default: $OBJAVERSE_NAVIGATION_PATH/placement_trials",
     )
-    parser.add_argument("--radius_m", type=float, default=FLOOR_ANCHOR_RADIUS_M)
+    parser.add_argument("--radius_m", type=float, required=True)
     parser.add_argument("--top_receptacles", type=int, default=TOP_RECEPTACLES)
     args = parser.parse_args(argv)
     output = Path(args.output) if args.output else Path(OBJAVERSE_NAVIGATION_PATH) / "placement_trials"

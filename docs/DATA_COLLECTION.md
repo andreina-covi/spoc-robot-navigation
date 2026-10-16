@@ -14,7 +14,7 @@ Extend SPOC RoomVisit navigation logging so post-processing / **cm-benchmark** c
 
 | Construct | Need |
 |-----------|------|
-| `invisible_displacement` | Per house, each pickupable is trial-placed on floor points within 1.2 m of landmarks in its room and on the 5 largest non-openable receptacles in that room. One spawn per anchor. Restored only when the place succeeds. Rows are `placement_candidates-house_XXXXXX.csv` from `scripts/placement_trials.py`. |
+| `invisible_displacement` | Per house, each pickupable is trial-placed on floor points within the given radius of landmarks in its room and on the 5 largest non-openable receptacles in that room. Landmarks are non-pickupable, non-structural objects, largest box first, including Objaverse instances. One spawn per anchor. Restored only when the place succeeds. A failed restore reloads the house before the next pickupable. Rows are `placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`. |
 | `survey_knowledge` | Multi-room trajectory + layout connectivity / door state |
 
 Facing / intrinsic “front of object” is **out of scope** for this pass.
@@ -31,7 +31,7 @@ online_eval (RoomVisit)
        RoomVisitTask: agent navigates, Collector writes the episode
   └─ after the agent finishes
        pass those sample house indexes to placement trials
-       write placement_candidates-house_XXXXXX.csv
+       write placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv
 ```
 
 | Module | Role |
@@ -53,7 +53,7 @@ Path: `$OBJAVERSE_NAVIGATION_PATH/`
 ```text
 $OBJAVERSE_NAVIGATION_PATH/
   placement_trials/
-    placement_candidates-house_XXXXXX.csv
+    placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv
   <timestamp>/                            # one episode
     images/
     annotations/
@@ -177,7 +177,7 @@ not in `navigation` for that step. Hidden pickupables appear only in `object_sta
 Tracking starts when a **pickupable** first has mask pixels in the agent camera.
 HousePlant / Fridge / counters / windows stay in `navigation` only.
 
-**`placement_candidates-house_XXXXXX.csv`** is written by `scripts/placement_trials.py`, not by the navigation episode. `anchor-id` is the receptacle id or the landmark id. `anchor-kind` is `receptacle` or `floor`. `pos-*` is the resolved pose when `success` is true. A successful place is restored before the next anchor. Episodes collected before this change may still contain `displacement_events`, `displacement_candidates`, and `displacement_debug`; those files are not written now.
+**`placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`** is written by `scripts/placement_trials.py`, not by the navigation episode. `anchor-id` is the receptacle id or the landmark id. `anchor-kind` is `receptacle` or `floor`. `pos-*` is the resolved pose when `success` is true. A successful place is restored before the next anchor. Episodes collected before this change may still contain `displacement_events`, `displacement_candidates`, and `displacement_debug`; those files are not written now.
 
 **`navigation-*.csv`:** one row group per step with `ag-action`, `action_success` (`lastActionSuccess`), and `ag-pos-*` / `ag-rot-*` after the action. Object rows are added only when `visible-pixels > 0`. Numeric ids are included. Hidden tracked pickupables stay in `object_state`.
 
@@ -193,15 +193,15 @@ HousePlant / Fridge / counters / windows stay in `navigation` only.
 
 The RoomVisit command already knows the house indexes: they are the `house_id` values on the eval samples. After the agent finishes, that same command passes those indexes to the placement trials. Nothing is written just to remember the indexes.
 
-The CSV is `$OBJAVERSE_NAVIGATION_PATH/placement_trials/placement_candidates-house_XXXXXX.csv`.
+The CSV is `$OBJAVERSE_NAVIGATION_PATH/placement_trials/placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`. The radius is `--floor_radius_m` on the RoomVisit command.
 
 For each pickupable:
 
-1. Floor: the closest floor spawn within 1.2 m of each non-structural landmark in its room. One point per landmark.
+1. Floor: the closest floor spawn within that radius of each landmark in its room. Landmarks are non-pickupable, non-structural objects in the room, largest box first, including Objaverse instances. One point per landmark.
 2. Receptacles: the 5 largest non-openable receptacles in that room (`receptacle_salience` is the axis-aligned box volume). Floor, wall, ceiling, room, and openable receptacles are excluded.
 3. One spawn coordinate per anchor. Spawn lists are cached per receptacle.
-4. `PlaceObjectAtPoint` with `forceKinematic`. The original pose is restored only when that place succeeds.
-5. Columns: `obj-id`, `anchor-id`, `anchor-kind` (`receptacle` or `floor`), `pos-*`, `success`.
+4. `PlaceObjectAtPoint` with `forceKinematic`. The original pose is restored only when that place succeeds. If the restore fails, the house is reloaded before the next pickupable.
+5. Columns: `obj-id`, `anchor-id`, `anchor-kind` (`receptacle` or `floor`), `pos-*`, `success`. The split and radius are in the file name.
 
 ---
 
@@ -227,14 +227,11 @@ Mitigations already in code:
   the agent never takes `done`.
 - **Incremental CSV flush** every `flush_every` (default 50) steps for navigation /
   doors / object_state so RAM stays bounded.
-- **FOV synthesis stride**: `renderInstanceSegmentation=True` at controller init, but
-  per-step `renderImageSynthesis` is true only on sampled frames. The spacing is
-  `max(horizon // 50, max_steps // 50)` with horizon 1000, so a full episode and a
-  40-step episode both render a mask every 20 steps. `max_steps // 1000` is 0 for
-  a 40-step run, and `max(1, 0)` rendered every step. Off-stride steps do not
-  update `in_camera_fov`. When synthesis is off, THOR may leave stale
-  `instance_detections2D` on `last_event`. Bbox and mask columns are filled only
-  when the task passes `include_detections=True` on a real synthesis step.
+- **FOV synthesis**: `renderInstanceSegmentation=True` at controller init, and
+  per-step `renderImageSynthesis` is true on every agent step (stride 1). When
+  synthesis is off, THOR may leave stale `instance_detections2D` on `last_event`.
+  Bbox and mask columns are filled only when the task passes
+  `include_detections=True` on a real synthesis step.
 
 ---
 
@@ -244,7 +241,7 @@ Mitigations already in code:
 |-------|-----|
 | `SPOCObject.get("pickupable", False)` always `False` | Implement `SPOCObject.get()` in `environment/spoc_objects.py` (builtin `dict.get` ignores `__getitem__`) |
 | `PlaceObjectAtPoint(..., forceAction=True)` ValueError | Use `forceKinematic=True` |
-| Objects left in the trial pose | `scripts/placement_trials.py` restores only after a successful place. |
+| Objects left in the trial pose | `scripts/placement_trials.py` restores only after a successful place. A failed restore reloads the house before the next pickupable. |
 | Scene name always `Procedural` | Use `house_<index>` |
 
 ---
@@ -276,7 +273,7 @@ export RUN="$OBJAVERSE_NAVIGATION_PATH/<timestamp>"
 export SCENE=house_XXXXXX   # from filenames
 
 cat "$RUN/annotations/episode_meta-${SCENE}.json"
-# Inspect placement_trials/placement_candidates-house_XXXXXX.csv
+# Inspect placement_trials/placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv
 ```
 
 Legacy spatial QA (`spatial_data_generation.py`, `qa_generator.py`) still consumes nav/objects CSVs (now under `annotations/`). Placement trials are the per-house `placement_candidates` file.
@@ -285,13 +282,13 @@ Legacy spatial QA (`spatial_data_generation.py`, `qa_generator.py`) still consum
 
 ## 8. Building QA from placement trials
 
-**Placement file:** `placement_candidates-house_XXXXXX.csv` from `scripts/placement_trials.py`. `anchor-id` / `anchor-kind` name the receptacle or the landmark whose floor point was tried. `pos-*` is the resolved pose when `success` is true. A successful place is restored before the next anchor.
+**Placement file:** `placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv` from `scripts/placement_trials.py`. `anchor-id` / `anchor-kind` name the receptacle or the landmark whose floor point was tried. `pos-*` is the resolved pose when `success` is true. A successful place is restored before the next anchor.
 
 Do **not** expect egocentric direction columns at collection time; compute those later from an agent pose in the navigation CSV.
 
 ### Validator pattern
 
-For a house, each pickupable has up to five receptacle rows and one floor row per landmark that has a spawn within 1.2 m. `success` is true when `PlaceObjectAtPoint` succeeded. The original pose is restored only in that case.
+For a house, each pickupable has up to five receptacle rows and one floor row per landmark that has a spawn within the requested radius. `success` is true when `PlaceObjectAtPoint` succeeded. The original pose is restored only in that case. A failed restore reloads the house before the next pickupable.
 
 ### Example item types
 

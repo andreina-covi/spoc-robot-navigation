@@ -23,7 +23,7 @@ from utils.nav_graph_export import (
     build_nav_graph_from_reachable_positions,
     reachability_grid_size,
 )
-from utils.placement_anchors import LANDMARK_TYPES
+from utils.placement_anchors import salient_landmarks
 from training.online.reward.reward_shaper import RoomVisitRewardShaper
 from collector import Collector
 from online_evaluation.max_episode_configs import MAX_EPISODE_LEN_PER_TASK
@@ -176,22 +176,24 @@ class RoomVisitTask(AbstractSPOCTask):
                 }
             )
 
-        # Landmarks: prefer large static house objects if present
+        # Landmarks: non-pickupable, non-structural objects, largest box first.
+        # Objaverse instances qualify the same way; type names are not used.
+        raw_objects = []
+        with self.controller.include_object_metadata_context():
+            raw_objects = [
+                dict(obj) for obj in self.controller.controller.last_event.metadata["objects"]
+            ]
+        for obj in raw_objects:
+            obj["room_id"] = room_id_at(self.room_poly_map, obj.get("position"))
         landmarks = []
-        for obj in self.house.get("objects", []):
-            otype = obj.get("assetId", "") or obj.get("id", "")
-            # house JSON uses nested structure; also try objectType-like fields
-            obj_type = obj.get("objectType") or obj.get("assetId", "").split("_")[0]
-            if obj_type not in LANDMARK_TYPES and not any(
-                t.lower() in str(otype).lower() for t in LANDMARK_TYPES
-            ):
-                continue
-            label = describe_object(obj.get("id"), obj_type, obj.get("assetId"))
+        for obj in salient_landmarks(raw_objects):
+            oid = obj.get("objectId") or obj.get("id")
+            label = describe_object(oid, obj.get("objectType"), obj.get("assetId"))
             pos = obj.get("position", {"x": 0, "y": 0, "z": 0})
-            room_id = room_id_at(self.room_poly_map, pos)
+            room_id = obj.get("room_id")
             landmarks.append(
                 {
-                    "landmark_id": obj.get("id"),
+                    "landmark_id": oid,
                     "obj-type": label.obj_type,
                     "obj-synset": label.synset,
                     "position": pos,
@@ -201,7 +203,7 @@ class RoomVisitTask(AbstractSPOCTask):
             if room_id is not None:
                 for r in regions:
                     if r["region_id"] == room_id:
-                        r["landmark_obj_ids"].append(obj.get("id"))
+                        r["landmark_obj_ids"].append(oid)
                         break
 
         return {
@@ -502,8 +504,7 @@ class RoomVisitTask(AbstractSPOCTask):
             else:
                 self.last_action_success = False
         else:
-            # Expensive: instance_detections2D / masks / segmentation frame.
-            # Gate on collector.timestep so logged frames stay evenly spaced.
+            # Instance masks render on every agent step.
             render_mask_this_step = self.collector.timestep % self.stride == 0
             event = self.controller.agent_step(
                 action=action_str,
@@ -541,8 +542,7 @@ class RoomVisitTask(AbstractSPOCTask):
                             by_id[o["objectId"]] = o
                 objects = list(by_id.values())
 
-                # Mask pixels only on sampled frames. Off-stride steps keep the
-                # last in_camera_fov value and do not advance hidden_steps.
+                # Mask pixels are recorded on every step.
                 if include_detections:
                     in_image_pickupables = self._gather_pickupables_in_image(event)
                     self.collector.update_visibility_tracking(in_image_pickupables)

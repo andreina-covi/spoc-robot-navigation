@@ -1,33 +1,13 @@
 """Receptacle and floor anchors for per-house placement trials."""
 
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Sequence
 
 import numpy as np
 
 from utils.constants.object_constants import is_structural_object
 from utils.data_generation_utils.navigation_utils import get_room_id_from_location
 
-FLOOR_ANCHOR_RADIUS_M = 1.2
 TOP_RECEPTACLES = 5
-
-LANDMARK_TYPES = {
-    "Fridge",
-    "Television",
-    "Sofa",
-    "Bed",
-    "Toilet",
-    "Sink",
-    "DiningTable",
-    "CoffeeTable",
-    "SideTable",
-    "CounterTop",
-    "Microwave",
-    "Oven",
-    "Desk",
-    "Dresser",
-    "ArmChair",
-    "TelevisionStand",
-}
 
 
 def room_id_at(room_poly_map, position):
@@ -50,11 +30,31 @@ def receptacle_salience(rec: Dict[str, Any]) -> float:
     return abs(float(dims[0])) * abs(float(dims[1])) * abs(float(dims[2]))
 
 
-def is_landmark_object(obj_type: Optional[str], asset_or_id: str = "") -> bool:
-    if obj_type in LANDMARK_TYPES:
-        return True
-    text = str(asset_or_id).lower()
-    return any(name.lower() in text for name in LANDMARK_TYPES)
+def salient_landmarks(objects: Sequence[Dict[str, Any]], room_id=None) -> List[Dict[str, Any]]:
+    """Non-pickupable, non-structural objects, largest box first.
+
+    Objaverse instances qualify through these flags and ``receptacle_salience``.
+    Type names are not used.
+    """
+    pool = []
+    for obj in objects:
+        if obj.get("pickupable"):
+            continue
+        oid = obj.get("objectId") or obj.get("id")
+        if not oid:
+            continue
+        if is_structural_object(obj_type=obj.get("objectType"), object_id=oid):
+            continue
+        if room_id is not None and obj.get("room_id") != room_id:
+            continue
+        pool.append(obj)
+    pool.sort(
+        key=lambda obj: (
+            -receptacle_salience(obj),
+            str(obj.get("objectId") or obj.get("id") or ""),
+        )
+    )
+    return pool
 
 
 def salient_receptacles(objects: Sequence[Dict[str, Any]], room_id, limit=TOP_RECEPTACLES):
@@ -88,7 +88,7 @@ def xyz_dict(point) -> Dict[str, float]:
     return {"x": float(point[0]), "y": float(point[1]), "z": float(point[2])}
 
 
-def floor_anchor_points(landmarks, spawns, radius_m=FLOOR_ANCHOR_RADIUS_M):
+def floor_anchor_points(landmarks, spawns, radius_m: float):
     """Closest floor spawn within ``radius_m`` of each landmark.
 
     ``landmarks`` items have ``landmark_id`` and ``position``.

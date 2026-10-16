@@ -45,6 +45,12 @@ def parse_args():
     )
     parser.add_argument("--model_version_override", default="auto")
     parser.add_argument("--total_num_videos", type=int, default=8200)
+    parser.add_argument(
+        "--floor_radius_m",
+        type=float,
+        default=None,
+        help="Floor-anchor radius in meters for RoomVisit placement trials.",
+    )
 
     args = parser.parse_args()
 
@@ -175,6 +181,9 @@ def main(args):
         dataset_type = args.dataset_type
         dataset_path = args.dataset_path
 
+    if "RoomVisit" in list_of_tasks and args.floor_radius_m is None:
+        raise ValueError("RoomVisit placement trials require --floor_radius_m")
+
     eval_args = {
         "dataset_path": dataset_path,
         "dataset_type": dataset_type,
@@ -203,12 +212,14 @@ def main(args):
 
         from scripts.placement_trials import houses_from_samples, run as run_placement_trials
         from utils.constants.objaverse_data_dirs import OBJAVERSE_NAVIGATION_PATH
-        from utils.placement_anchors import FLOOR_ANCHOR_RADIUS_M, TOP_RECEPTACLES
+        from utils.placement_anchors import TOP_RECEPTACLES
 
         samples = evaluator.eval_samples.get("RoomVisit", [])
         output = Path(OBJAVERSE_NAVIGATION_PATH) / "placement_trials"
         for split, indexes in houses_from_samples(samples).items():
-            run_placement_trials(split, indexes, output, FLOOR_ANCHOR_RADIUS_M, TOP_RECEPTACLES)
+            run_placement_trials(
+                split, indexes, output, args.floor_radius_m, TOP_RECEPTACLES
+            )
 
 
 def make_wandb(wandb_project, wandb_entity, wandb_name, wandb_directory):

@@ -48,10 +48,10 @@ This sets (edit paths in `configure_variables.sh` if needed):
 
 `RoomVisitTask` uses `Collector` during navigation. While the agent explores:
 
-1. A pickupable is tracked the first time it has nav-camera mask pixels. Masks render about every 20 agent steps, including on a short episode.
+1. A pickupable is tracked the first time it has nav-camera mask pixels. Masks render on every agent step.
 2. On episode end (`done` or `max_steps`), logs are saved under `$OBJAVERSE_NAVIGATION_PATH/<timestamp>/` with `images/` and `annotations/`.
 
-Placement trials run in that same command, after the agent finishes. The house indexes are the ones already on the eval samples; they are passed in memory. The command writes `$OBJAVERSE_NAVIGATION_PATH/placement_trials/placement_candidates-house_XXXXXX.csv`. Each pickupable is tried on floor points within 1.2 m of landmarks in its room and on the 5 largest non-openable receptacles in that room. One spawn per anchor. The object is restored only when the place succeeds.
+Placement trials run in that same command, after the agent finishes. The house indexes are the ones already on the eval samples; they are passed in memory. Pass `--floor_radius_m`. The command writes `$OBJAVERSE_NAVIGATION_PATH/placement_trials/placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`. Each pickupable is tried on floor points within that radius of landmarks in its room and on the 5 largest non-openable receptacles in that room. Landmarks are non-pickupable, non-structural objects, largest box first, including Objaverse instances. One spawn per anchor. The object is restored only when the place succeeds. A failed restore reloads the house before the next pickupable.
 
 Run it:
 
@@ -62,6 +62,7 @@ python -m training.offline.online_eval --shuffle --eval_subset minival \
   --output_basedir /home/andreina/Documents/Programs/Dataset/logs \
   --test_augmentation --task_type RoomVisit \
   --eval_set_size 1 \
+  --floor_radius_m 1.2 \
   --input_sensors raw_navigation_camera raw_manipulation_camera last_actions an_object_is_in_hand \
   --house_set objaverse --wandb_logging False --num_workers 1 \
   --gpu_devices 0 \
@@ -76,7 +77,7 @@ Increase `--eval_set_size` for more episodes. Details, schemas, and QA recipes: 
 ```text
 $OBJAVERSE_NAVIGATION_PATH/
   placement_trials/
-    placement_candidates-house_XXXXXX.csv
+    placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv
   <MM_DD_YYYY_HH_MM_SS_ffffff>/
     images/                                 # RGB frames (img_<t>.png)
     annotations/                            # all CSV + JSON for the episode
@@ -115,7 +116,7 @@ export SCENE=house_XXXXXX
 cat "$RUN/annotations/episode_meta-${SCENE}.json"
 ```
 
-Placement trials from that same command are `placement_trials/placement_candidates-house_XXXXXX.csv`. The house indexes come from the eval samples.
+Placement trials from that same command are `placement_trials/placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`. The house indexes come from the eval samples.
 `success` marks a place that was read and then restored.
 Full review snippets: [docs/DATA_COLLECTION.md](docs/DATA_COLLECTION.md) §§7–8.
 
@@ -163,7 +164,7 @@ Synset sources:
 
 ## 6. Generate QA (legacy spatial templates)
 
-For **placement-trial / survey** items, use `placement_candidates-house_XXXXXX.csv`
+For **placement-trial / survey** items, use `placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`
 from `scripts/placement_trials.py` and `world_layout` (see [docs/DATA_COLLECTION.md](docs/DATA_COLLECTION.md)).
 
 ---
