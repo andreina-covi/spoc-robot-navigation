@@ -1,13 +1,16 @@
 """Receptacle and floor anchors for per-house placement trials."""
 
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 
+from geometry import aabb_bounds
 from utils.constants.object_constants import is_structural_object
 from utils.data_generation_utils.navigation_utils import get_room_id_from_location
 
 TOP_RECEPTACLES = 5
+TOP_LANDMARKS = 5
+FLOOR_CONTACT_M = 0.1
 
 
 def room_id_at(room_poly_map, position):
@@ -30,31 +33,96 @@ def receptacle_salience(rec: Dict[str, Any]) -> float:
     return abs(float(dims[0])) * abs(float(dims[1])) * abs(float(dims[2]))
 
 
-def salient_landmarks(objects: Sequence[Dict[str, Any]], room_id=None) -> List[Dict[str, Any]]:
-    """Non-pickupable, non-structural objects, largest box first.
+def _axis_y(value) -> Optional[float]:
+    if isinstance(value, dict) and "y" in value:
+        return float(value["y"])
+    return None
 
-    Objaverse instances qualify through these flags and ``receptacle_salience``.
-    Type names are not used.
-    """
-    pool = []
+
+def aabb_bottom_y(obj: Dict[str, Any]) -> Optional[float]:
+    """Lowest y of the axis-aligned box."""
+    box = obj.get("axisAlignedBoundingBox") or {}
+    center_y = _axis_y(box.get("center"))
+    size_y = _axis_y(box.get("size"))
+    if center_y is not None and size_y is not None:
+        return center_y - abs(size_y) / 2.0
+    low, _high = aabb_bounds(box)
+    if low is None:
+        return None
+    return low[1]
+
+
+def floor_surface_y(obj: Dict[str, Any]) -> Optional[float]:
+    """Top of the floor box, the walking surface."""
+    box = obj.get("axisAlignedBoundingBox") or {}
+    center_y = _axis_y(box.get("center"))
+    size_y = _axis_y(box.get("size"))
+    if center_y is not None and size_y is not None:
+        return center_y + abs(size_y) / 2.0
+    _low, high = aabb_bounds(box)
+    if high is not None:
+        return high[1]
+    return _axis_y(obj.get("position"))
+
+
+def _is_floor(obj: Dict[str, Any]) -> bool:
+    oid = obj.get("objectId") or obj.get("id")
+    return obj.get("objectType") == "Floor" or str(oid or "").startswith("Floor|")
+
+
+def floor_height_by_room(objects: Sequence[Dict[str, Any]]) -> Dict[Any, float]:
+    grouped: Dict[Any, List[float]] = {}
     for obj in objects:
-        if obj.get("pickupable"):
+        if not _is_floor(obj):
             continue
-        oid = obj.get("objectId") or obj.get("id")
-        if not oid:
+        room = obj.get("room_id")
+        height = floor_surface_y(obj)
+        if room is None or height is None:
             continue
-        if is_structural_object(obj_type=obj.get("objectType"), object_id=oid):
+        grouped.setdefault(room, []).append(height)
+    return {room: float(np.median(heights)) for room, heights in grouped.items()}
+
+
+def salient_landmarks(
+    objects: Sequence[Dict[str, Any]],
+    room_id=None,
+    limit: int = TOP_LANDMARKS,
+) -> List[Dict[str, Any]]:
+    """Largest non-pickupable, non-structural objects standing on the floor.
+
+    An object qualifies when its box bottom is within ``FLOOR_CONTACT_M`` of
+    that room's floor height. Each room contributes at most ``limit`` objects.
+    Objaverse instances qualify the same way. Type names are not used.
+    """
+    heights = floor_height_by_room(objects)
+    if room_id is not None:
+        rooms = [room_id]
+    else:
+        rooms = sorted((room for room in heights), key=str)
+    chosen: List[Dict[str, Any]] = []
+    for room in rooms:
+        floor_y = heights.get(room)
+        if floor_y is None:
             continue
-        if room_id is not None and obj.get("room_id") != room_id:
-            continue
-        pool.append(obj)
-    pool.sort(
-        key=lambda obj: (
-            -receptacle_salience(obj),
-            str(obj.get("objectId") or obj.get("id") or ""),
+        pool = []
+        for obj in objects:
+            if obj.get("room_id") != room or obj.get("pickupable"):
+                continue
+            oid = obj.get("objectId") or obj.get("id")
+            if not oid or is_structural_object(obj_type=obj.get("objectType"), object_id=oid):
+                continue
+            bottom = aabb_bottom_y(obj)
+            if bottom is None or abs(bottom - floor_y) > FLOOR_CONTACT_M:
+                continue
+            pool.append(obj)
+        pool.sort(
+            key=lambda obj: (
+                -receptacle_salience(obj),
+                str(obj.get("objectId") or obj.get("id") or ""),
+            )
         )
-    )
-    return pool
+        chosen.extend(pool[:limit])
+    return chosen
 
 
 def salient_receptacles(objects: Sequence[Dict[str, Any]], room_id, limit=TOP_RECEPTACLES):

@@ -176,7 +176,7 @@ class RoomVisitTask(AbstractSPOCTask):
                 }
             )
 
-        # Landmarks: non-pickupable, non-structural objects, largest box first.
+        # Landmarks: top objects per room whose box sits on the floor.
         # Objaverse instances qualify the same way; type names are not used.
         raw_objects = []
         with self.controller.include_object_metadata_context():

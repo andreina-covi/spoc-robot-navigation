@@ -40,16 +40,47 @@ def test_floor_anchor_is_the_closest_spawn_inside_the_radius():
     assert anchors[0][1]["x"] == 0.4
 
 
-def test_landmarks_are_non_pickupable_ranked_by_volume():
+def _standing(oid, typ, room, sx, sy, sz, bottom=0.0, pickupable=False):
+    return {
+        "objectId": oid,
+        "objectType": typ,
+        "room_id": room,
+        "pickupable": pickupable,
+        "axisAlignedBoundingBox": {
+            "center": {"x": 0, "y": bottom + sy / 2, "z": 0},
+            "size": {"x": sx, "y": sy, "z": sz},
+        },
+    }
+
+
+def _floor(room, surface=0.0):
+    thickness = 0.02
+    return {
+        "objectId": f"Floor|{room}",
+        "objectType": "Floor",
+        "room_id": room,
+        "axisAlignedBoundingBox": {
+            "center": {"x": 0, "y": surface - thickness / 2, "z": 0},
+            "size": {"x": 4, "y": thickness, "z": 4},
+        },
+    }
+
+
+def test_landmarks_keep_floor_contact_and_top_n():
     objects = [
-        {"objectId": "ObjaTable|1", "objectType": "ObjaTable", "room_id": "room|1", **_box(2, 1, 2)},
-        {"objectId": "Chair|1", "objectType": "Chair", "room_id": "room|1", **_box(1, 1, 1)},
-        {"objectId": "Cup|1", "objectType": "Cup", "pickupable": True, "room_id": "room|1", **_box(3, 3, 3)},
-        {"objectId": "Floor|1", "objectType": "Floor", "room_id": "room|1", **_box(9, 1, 9)},
-        {"objectId": "Sofa|2", "objectType": "Sofa", "room_id": "room|2", **_box(4, 1, 2)},
+        _floor("room|1"),
+        _floor("room|2"),
+        _standing("ObjaTable|1", "ObjaTable", "room|1", 2, 1, 2),
+        _standing("Chair|1", "Chair", "room|1", 1, 1, 1, bottom=0.05),
+        _standing("Painting|1", "Painting", "room|1", 1, 1, 0.1, bottom=1.4),
+        _standing("Cup|1", "Cup", "room|1", 1, 1, 1, pickupable=True),
+        _standing("Sofa|2", "Sofa", "room|2", 3, 1, 2),
     ]
-    chosen = salient_landmarks(objects, "room|1")
-    assert [obj["objectId"] for obj in chosen] == ["ObjaTable|1", "Chair|1"]
+    assert [obj["objectId"] for obj in salient_landmarks(objects, "room|1", limit=1)] == [
+        "ObjaTable|1"
+    ]
+    both_rooms = [obj["objectId"] for obj in salient_landmarks(objects, limit=5)]
+    assert both_rooms == ["ObjaTable|1", "Chair|1", "Sofa|2"]
 
 
 def test_candidates_name_includes_split_and_radius():

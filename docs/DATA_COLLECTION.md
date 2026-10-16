@@ -14,7 +14,7 @@ Extend SPOC RoomVisit navigation logging so post-processing / **cm-benchmark** c
 
 | Construct | Need |
 |-----------|------|
-| `invisible_displacement` | Per house, each pickupable is trial-placed on floor points within the given radius of landmarks in its room and on the 5 largest non-openable receptacles in that room. Landmarks are non-pickupable, non-structural objects, largest box first, including Objaverse instances. One spawn per anchor. Restored only when the place succeeds. A failed restore reloads the house before the next pickupable. Rows are `placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`. |
+| `invisible_displacement` | Per house, each pickupable is trial-placed on floor points within the given radius of landmarks in its room and on the 5 largest non-openable receptacles in that room. Landmarks are the 5 largest non-pickupable, non-structural objects whose box bottom is within 0.1 m of the floor, including Objaverse instances. One spawn per anchor. Restored only when the place succeeds. A failed restore reloads the house before the next pickupable. Rows are `placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv` and include `radius_m`. |
 | `survey_knowledge` | Multi-room trajectory + layout connectivity / door state |
 
 Facing / intrinsic “front of object” is **out of scope** for this pass.
@@ -197,11 +197,11 @@ The CSV is `$OBJAVERSE_NAVIGATION_PATH/placement_trials/placement_candidates-hou
 
 For each pickupable:
 
-1. Floor: the closest floor spawn within that radius of each landmark in its room. Landmarks are non-pickupable, non-structural objects in the room, largest box first, including Objaverse instances. One point per landmark.
+1. Floor: the closest floor spawn within that radius of each landmark in its room. Landmarks are the 5 largest non-pickupable, non-structural objects whose box bottom is within 0.1 m of the floor height, including Objaverse instances. `--top_landmarks` changes that count. One point per landmark.
 2. Receptacles: the 5 largest non-openable receptacles in that room (`receptacle_salience` is the axis-aligned box volume). Floor, wall, ceiling, room, and openable receptacles are excluded.
 3. One spawn coordinate per anchor. Spawn lists are cached per receptacle.
 4. `PlaceObjectAtPoint` with `forceKinematic`. The original pose is restored only when that place succeeds. If the restore fails, the house is reloaded before the next pickupable.
-5. Columns: `obj-id`, `anchor-id`, `anchor-kind` (`receptacle` or `floor`), `pos-*`, `success`. The split and radius are in the file name.
+5. Columns: `obj-id`, `anchor-id`, `anchor-kind` (`receptacle` or `floor`), `pos-*`, `success`, `radius_m`. The split and radius are also in the file name.
 
 ---
 
