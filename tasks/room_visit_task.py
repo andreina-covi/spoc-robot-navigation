@@ -186,7 +186,8 @@ class RoomVisitTask(AbstractSPOCTask):
         for obj in raw_objects:
             obj["room_id"] = room_id_at(self.room_poly_map, obj.get("position"))
         landmarks = []
-        for obj in salient_landmarks(raw_objects):
+        passage_ids = {passage["obj-id"] for passage in passages if passage.get("obj-id")}
+        for obj in salient_landmarks(raw_objects, passage_ids=passage_ids):
             oid = obj.get("objectId") or obj.get("id")
             label = describe_object(oid, obj.get("objectType"), obj.get("assetId"))
             pos = obj.get("position", {"x": 0, "y": 0, "z": 0})

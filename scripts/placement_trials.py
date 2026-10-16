@@ -6,11 +6,13 @@ Loads one house into AI2-THOR. For each pickupable, places it once on:
 - the closest floor spawn within the given radius of each landmark in that room
 - the 5 most salient non-openable receptacles in that room
 
-Landmarks are non-pickupable, non-structural objects, largest box first.
-Objaverse instances are included by that rule. Each anchor uses one spawn
-coordinate, cached for the house. The object is restored only when the place
-succeeds. A failed restore reloads the house before the next pickupable.
-Writes ``placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv``.
+Landmarks are non-pickupable, non-structural objects standing on the floor.
+Doors and doorways are excluded. A receptacle place is kept only when that
+receptacle is in the object's parentReceptacles. Up to 3 spawn points are
+tried, the ones closest to the receptacle's top face. The object is restored
+only when the place action succeeds. A failed restore reloads the house
+before the next pickupable. Writes
+``placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv``.
 
 The RoomVisit command already has these house indexes on its eval samples.
 After the agent finishes, it passes that list to ``run``.
@@ -41,12 +43,16 @@ from utils.constants.stretch_initialization_utils import STRETCH_ENV_ARGS  # noq
 from utils.placement_anchors import (  # noqa: E402
     TOP_LANDMARKS,
     TOP_RECEPTACLES,
+    aabb_top_center,
     floor_anchor_points,
+    nearest_points,
     room_id_at,
     salient_landmarks,
     salient_receptacles,
     xyz_dict,
 )
+
+MAX_RECEPTACLE_SPAWNS = 3
 
 CSV_FIELDS = (
     "obj-id",
@@ -57,7 +63,10 @@ CSV_FIELDS = (
     "pos-z",
     "success",
     "radius_m",
+    "parent-receptacle",
 )
+
+PHYSICS_SETTLE_STEPS = 10
 
 
 def house_name(house_index: int) -> str:
@@ -98,10 +107,14 @@ def load_house(split: str, house_index: int, houses_dir: Path) -> dict:
     raise IndexError(f"{path} has no house at line index {house_index}")
 
 
-def landmark_points(objects, room_id, limit=TOP_LANDMARKS) -> List[dict]:
+def passage_ids_from_house(house: dict) -> set:
+    return {door["id"] for door in house.get("doors") or [] if door.get("id")}
+
+
+def landmark_points(objects, room_id, limit=TOP_LANDMARKS, passage_ids=None) -> List[dict]:
     """Floor-anchor landmarks in one room, largest box first."""
     points = []
-    for obj in salient_landmarks(objects, room_id, limit=limit):
+    for obj in salient_landmarks(objects, room_id, limit=limit, passage_ids=passage_ids):
         oid = obj.get("objectId") or obj.get("id")
         position = obj.get("position")
         if not oid or not position:
@@ -133,11 +146,11 @@ class SpawnCache:
                 self._coords[receptacle_id] = []
         return self._coords[receptacle_id]
 
-    def first(self, receptacle_id: str):
+    def closest(self, receptacle_id: str, target, limit: int = MAX_RECEPTACLE_SPAWNS) -> list:
         coords = self.coordinates(receptacle_id)
-        if not coords:
-            return None
-        return xyz_dict(coords[0])
+        if not coords or target is None:
+            return []
+        return nearest_points(coords, target, limit)
 
 
 def place_at(controller: StretchController, object_id: str, position, rotation=None) -> bool:
@@ -152,6 +165,18 @@ def place_at(controller: StretchController, object_id: str, position, rotation=N
         kwargs["rotation"] = xyz_dict(rotation)
     event = controller.step(**kwargs)
     return bool(event.metadata.get("lastActionSuccess", False))
+
+
+def parent_receptacle_ids(controller: StretchController, object_id: str) -> List[str]:
+    try:
+        obj = controller.get_object(object_id, include_receptacle_info=True)
+    except Exception:
+        return []
+    return [str(parent) for parent in (obj.get("parentReceptacles") or [])]
+
+
+def format_parents(parents: List[str]) -> str:
+    return ";".join(parents)
 
 
 def resolved_position(controller: StretchController, object_id: str, fallback):
@@ -176,18 +201,18 @@ def trial_anchor(
     Returns the CSV row and whether the object is back at its original pose.
     """
     if target is None:
-        return row(object_id, anchor_id, anchor_kind, None, False, radius_m), True
+        return row(object_id, anchor_id, anchor_kind, None, False, radius_m, ""), True
     ok = place_at(controller, object_id, target)
     if not ok:
-        return row(object_id, anchor_id, anchor_kind, None, False, radius_m), True
+        return row(object_id, anchor_id, anchor_kind, None, False, radius_m, ""), True
     pose = resolved_position(controller, object_id, target)
     restored = place_at(controller, object_id, origin, origin_rot)
     if not restored:
         print(f"[placement] restore failed obj={object_id} anchor={anchor_id}")
-    return row(object_id, anchor_id, anchor_kind, pose, True, radius_m), restored
+    return row(object_id, anchor_id, anchor_kind, pose, True, radius_m, ""), restored
 
 
-def row(object_id, anchor_id, anchor_kind, pose, success, radius_m) -> dict:
+def row(object_id, anchor_id, anchor_kind, pose, success, radius_m, parent_receptacle="") -> dict:
     return {
         "obj-id": object_id,
         "anchor-id": anchor_id,
@@ -197,7 +222,48 @@ def row(object_id, anchor_id, anchor_kind, pose, success, radius_m) -> dict:
         "pos-z": None if pose is None else pose[2],
         "success": bool(success),
         "radius_m": radius_m,
+        "parent-receptacle": parent_receptacle,
     }
+
+
+def trial_receptacle(
+    controller, object_id, receptacle, origin, origin_rot, radius_m, cache: SpawnCache
+):
+    """Try the spawn points closest to the receptacle's top face.
+
+    The place is accepted only when ``receptacle`` is in parentReceptacles.
+    Up to 3 points are tried. The object is restored after each place action
+    that succeeds.
+    """
+    rid = receptacle.get("objectId") or receptacle.get("id")
+    targets = cache.closest(rid, aabb_top_center(receptacle), MAX_RECEPTACLE_SPAWNS)
+    if not targets:
+        return row(object_id, rid, "receptacle", None, False, radius_m, ""), True
+    last_parents = ""
+    for target in targets:
+        if not place_at(controller, object_id, target):
+            continue
+        parents = parent_receptacle_ids(controller, object_id)
+        last_parents = format_parents(parents)
+        accepted = rid in parents
+        pose = resolved_position(controller, object_id, target) if accepted else None
+        restored = place_at(controller, object_id, origin, origin_rot)
+        if not restored:
+            print(f"[placement] restore failed obj={object_id} anchor={rid}")
+            return (
+                row(object_id, rid, "receptacle", pose, accepted, radius_m, last_parents),
+                False,
+            )
+        if accepted:
+            return row(object_id, rid, "receptacle", pose, True, radius_m, last_parents), True
+    return row(object_id, rid, "receptacle", None, False, radius_m, last_parents), True
+
+
+def reset_house(controller: StretchController, house: dict) -> None:
+    """Reload the house and let objects fall before their poses are read."""
+    controller.reset(house)
+    for _ in range(PHYSICS_SETTLE_STEPS):
+        controller.step(action="AdvancePhysicsStep", renderImageSynthesis=False)
 
 
 def scene_objects(controller: StretchController) -> List[dict]:
@@ -229,6 +295,7 @@ def floor_spawns(cache: SpawnCache, objects, room_id) -> list:
 
 def trials_for_house(controller, house, radius_m, top_n, top_landmarks=TOP_LANDMARKS) -> List[dict]:
     objects = scene_objects(controller)
+    passages = passage_ids_from_house(house)
     cache = SpawnCache(controller)
     floor_by_room: Dict[Any, list] = {}
     rows = []
@@ -245,7 +312,7 @@ def trials_for_house(controller, house, radius_m, top_n, top_landmarks=TOP_LANDM
             floor_by_room[room_id] = floor_spawns(cache, objects, room_id)
         restore_ok = True
         for anchor_id, point in floor_anchor_points(
-            landmark_points(objects, room_id, top_landmarks), floor_by_room[room_id], radius_m
+            landmark_points(objects, room_id, top_landmarks, passages), floor_by_room[room_id], radius_m
         ):
             result, restore_ok = trial_anchor(
                 controller, oid, anchor_id, "floor", point, origin, origin_rot, radius_m
@@ -255,23 +322,15 @@ def trials_for_house(controller, house, radius_m, top_n, top_landmarks=TOP_LANDM
                 break
         if restore_ok:
             for rec in salient_receptacles(objects, room_id, limit=top_n):
-                rid = rec.get("objectId") or rec.get("id")
-                result, restore_ok = trial_anchor(
-                    controller,
-                    oid,
-                    rid,
-                    "receptacle",
-                    cache.first(rid),
-                    origin,
-                    origin_rot,
-                    radius_m,
+                result, restore_ok = trial_receptacle(
+                    controller, oid, rec, origin, origin_rot, radius_m, cache
                 )
                 rows.append(result)
                 if not restore_ok:
                     break
         if not restore_ok:
             print(f"[placement] resetting house before the next object after {oid}")
-            controller.reset(house)
+            reset_house(controller, house)
             objects = scene_objects(controller)
             cache = SpawnCache(controller)
             floor_by_room = {}
@@ -310,7 +369,7 @@ def run(
         for index, house in houses:
             name = house_name(index)
             print(f"[placement] loading {name}")
-            controller.reset(house)
+            reset_house(controller, house)
             rows = trials_for_house(controller, house, radius_m, top_n, top_landmarks)
             path = output_dir / candidates_name(index, split, radius_m)
             write_csv(path, rows)

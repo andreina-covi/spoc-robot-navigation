@@ -1,5 +1,6 @@
 from utils.placement_anchors import (
     floor_anchor_points,
+    nearest_points,
     receptacle_salience,
     salient_landmarks,
     salient_receptacles,
@@ -75,12 +76,36 @@ def test_landmarks_keep_floor_contact_and_top_n():
         _standing("Painting|1", "Painting", "room|1", 1, 1, 0.1, bottom=1.4),
         _standing("Cup|1", "Cup", "room|1", 1, 1, 1, pickupable=True),
         _standing("Sofa|2", "Sofa", "room|2", 3, 1, 2),
+        _standing("door|1|2", "Door", "room|1", 3, 2, 0.2),
     ]
     assert [obj["objectId"] for obj in salient_landmarks(objects, "room|1", limit=1)] == [
         "ObjaTable|1"
     ]
     both_rooms = [obj["objectId"] for obj in salient_landmarks(objects, limit=5)]
     assert both_rooms == ["ObjaTable|1", "Chair|1", "Sofa|2"]
+
+
+def test_room_without_floor_uses_lowest_house_floor():
+    objects = [
+        _floor("room|1", surface=0.0),
+        _floor("room|2", surface=1.0),
+        _standing("Desk|3", "Desk", "room|3", 2, 1, 1, bottom=0.0),
+        _standing("Lamp|3", "Lamp", "room|3", 0.4, 1.5, 0.4, bottom=1.0),
+    ]
+    assert [obj["objectId"] for obj in salient_landmarks(objects, "room|3")] == ["Desk|3"]
+
+
+def test_nearest_points_are_closest_to_the_top_center():
+    target = {"x": 0.0, "y": 1.0, "z": 0.0}
+    points = [
+        {"x": 5.0, "y": 1.0, "z": 0.0},
+        {"x": 0.2, "y": 1.1, "z": 0.0},
+        {"x": 0.4, "y": 1.0, "z": 0.1},
+        {"x": 1.0, "y": 1.0, "z": 0.0},
+        {"x": 3.0, "y": 1.0, "z": 0.0},
+    ]
+    chosen = nearest_points(points, target, limit=3)
+    assert [point["x"] for point in chosen] == [0.2, 0.4, 1.0]
 
 
 def test_candidates_name_includes_split_and_radius():

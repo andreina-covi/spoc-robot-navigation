@@ -197,11 +197,11 @@ The CSV is `$OBJAVERSE_NAVIGATION_PATH/placement_trials/placement_candidates-hou
 
 For each pickupable:
 
-1. Floor: the closest floor spawn within that radius of each landmark in its room. Landmarks are the 5 largest non-pickupable, non-structural objects whose box bottom is within 0.1 m of the floor height, including Objaverse instances. `--top_landmarks` changes that count. One point per landmark.
+1. Floor: the closest floor spawn within that radius of each landmark in its room. Landmarks are the 5 largest non-pickupable, non-structural objects whose box bottom is within 0.1 m of the floor height, including Objaverse instances. Doors and doorways are excluded. A room with no floor uses the lowest floor height in the house. `--top_landmarks` changes that count. One point per landmark. Object poses are read after 10 physics steps.
 2. Receptacles: the 5 largest non-openable receptacles in that room (`receptacle_salience` is the axis-aligned box volume). Floor, wall, ceiling, room, and openable receptacles are excluded.
-3. One spawn coordinate per anchor. Spawn lists are cached per receptacle.
-4. `PlaceObjectAtPoint` with `forceKinematic`. The original pose is restored only when that place succeeds. If the restore fails, the house is reloaded before the next pickupable.
-5. Columns: `obj-id`, `anchor-id`, `anchor-kind` (`receptacle` or `floor`), `pos-*`, `success`, `radius_m`. The split and radius are also in the file name.
+3. Up to 3 spawn coordinates per receptacle, the ones closest to the center of its top face. Spawn lists are cached per receptacle. One floor spawn per landmark.
+4. `PlaceObjectAtPoint` with `forceKinematic`. A receptacle row is `success` only when that receptacle is in `parentReceptacles` after the place. `parent-receptacle` records those ids. The original pose is restored only when the place action succeeds. If the restore fails, the house is reloaded before the next pickupable.
+5. Columns: `obj-id`, `anchor-id`, `anchor-kind` (`receptacle` or `floor`), `pos-*`, `success`, `radius_m`, `parent-receptacle`. The split and radius are also in the file name.
 
 ---
 
