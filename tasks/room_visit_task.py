@@ -318,7 +318,8 @@ class RoomVisitTask(AbstractSPOCTask):
         """Metadata for non-structural objects with pixels in the nav camera.
 
         Numeric ids such as ``6|5`` are included. Walls, floors, ceilings, and
-        rooms are not. Each object gets ``roomId`` for the objects CSV.
+        rooms are not. Each object gets ``roomId`` and ``roomType`` from its own
+        position, separate from the agent's current room.
         """
         result = []
         if detections is None:
@@ -346,7 +347,11 @@ class RoomVisitTask(AbstractSPOCTask):
                 continue
             if not is_exportable_object(obj_type=obj.get("objectType"), object_id=oid):
                 continue
-            obj["roomId"] = room_id_at(self.room_poly_map, obj.get("position"))
+            room_id = room_id_at(self.room_poly_map, obj.get("position"))
+            obj["roomId"] = room_id
+            obj["roomType"] = (
+                self.room_type_dict.get(room_id) if room_id is not None else None
+            )
             result.append(obj)
         return result
 

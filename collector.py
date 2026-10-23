@@ -144,12 +144,27 @@ class Collector:
             if is_exportable_object(object_id=oid)
         }
 
-    def get_visible_pixels_from_bbox(self, event, bbox, color):
-        """Get visible pixels from bbox and color."""
-        cmin, rmin, cmax, rmax = bbox
+    def get_visible_pixels_from_bbox(self, event, bbox, color, with_mark=False):
+        """Mask pixels inside the detection box, and the most interior pixel.
+
+        ``mark-x`` / ``mark-y`` are full-image coordinates of the mask pixel
+        farthest from the mask edge. Both come from this crop; nothing else
+        is rendered.
+        """
+        cmin, rmin, cmax, rmax = (int(v) for v in bbox)
         crop = event.instance_segmentation_frame[rmin:rmax, cmin:cmax]
-        visible_pixels = int(np.all(crop == color, axis=2).sum())
-        return visible_pixels
+        if crop.size == 0:
+            return (0, None, None) if with_mark else 0
+        mask = np.all(crop == color, axis=2)
+        visible_pixels = int(mask.sum())
+        if not with_mark:
+            return visible_pixels
+        if visible_pixels <= 0:
+            return visible_pixels, None, None
+        padded = np.pad(mask.astype(np.uint8), 1, constant_values=0)
+        distance = cv2.distanceTransform(padded, cv2.DIST_L2, 3)[1:-1, 1:-1]
+        local_row, local_col = np.unravel_index(int(np.argmax(distance)), distance.shape)
+        return visible_pixels, int(cmin + local_col), int(rmin + local_row)
 
     def get_object_data(self, arr_objects, event, include_detections=False):
         """Collect non-structural objects for navigation / objects CSV.
@@ -196,6 +211,8 @@ class Collector:
 
             # Require in-image mask pixels for a navigation row (clean FOV export)
             visible_pixels = None
+            mark_x = None
+            mark_y = None
             bbox = None
             bbox_area = None
             min_side = None
@@ -208,7 +225,9 @@ class Collector:
             ):
                 continue
             cand = detections[oid]
-            visible_pixels = self.get_visible_pixels_from_bbox(event, cand, color)
+            visible_pixels, mark_x, mark_y = self.get_visible_pixels_from_bbox(
+                event, cand, color, with_mark=True
+            )
             if visible_pixels is None or visible_pixels <= 0:
                 continue
             cmin, rmin, cmax, rmax = cand
@@ -286,6 +305,7 @@ class Collector:
                 "aabb_min": self._xyz(aabb_min),
                 "aabb_max": self._xyz(aabb_max),
                 "room_id": obj_dict.get("roomId"),
+                "room_type": obj_dict.get("roomType"),
             }
 
             dist = float(obj_dict.get("distance") or 0.0)
@@ -319,6 +339,10 @@ class Collector:
                     bbox_area,
                     min_side,
                     occupancy,
+                    mark_x,
+                    mark_y,
+                    obj_dict.get("roomId"),
+                    obj_dict.get("roomType"),
                 ]
             )
 
@@ -363,6 +387,8 @@ class Collector:
         if not objects_data:
             self.add_basic_navigation_data(dict_navigation, key)
             dict_navigation["obj-id"].append(None)
+            dict_navigation["obj-room"].append(None)
+            dict_navigation["obj-room-type"].append(None)
             dict_navigation["obj-distance"].append(None)
             self.save_bbox(dict_navigation, [None, None, None, None])
             dict_navigation["expected-bbox-area"].append(None)
@@ -376,11 +402,17 @@ class Collector:
             dict_navigation["bbox-area"].append(None)
             dict_navigation["min-side"].append(None)
             dict_navigation["occupancy-ratio"].append(None)
+            dict_navigation["mark-x"].append(None)
+            dict_navigation["mark-y"].append(None)
             return
 
         for object_data in objects_data:
             self.add_basic_navigation_data(dict_navigation, key)
             dict_navigation["obj-id"].append(object_data[0])
+            dict_navigation["obj-room"].append(object_data[16] if len(object_data) > 16 else None)
+            dict_navigation["obj-room-type"].append(
+                object_data[17] if len(object_data) > 17 else None
+            )
             dict_navigation["obj-distance"].append(object_data[1])
             bbox = object_data[2] if len(object_data) > 2 else [None, None, None, None]
             if bbox is None:
@@ -388,7 +420,7 @@ class Collector:
             self.save_bbox(dict_navigation, bbox)
             # Layout: [oid, dist, bbox, exp_area, ang_w, ang_h,
             #          exp_cmin, exp_cmax, exp_rmin, exp_rmax,
-            #          vis_px, area, min_side, occ]
+            #          vis_px, area, min_side, occ, mark_x, mark_y, obj_room, obj_room_type]
             if len(object_data) >= 14:
                 dict_navigation["expected-bbox-area"].append(object_data[3])
                 dict_navigation["ang-width-deg"].append(object_data[4])
@@ -401,6 +433,8 @@ class Collector:
                 dict_navigation["bbox-area"].append(object_data[11])
                 dict_navigation["min-side"].append(object_data[12])
                 dict_navigation["occupancy-ratio"].append(object_data[13])
+                dict_navigation["mark-x"].append(object_data[14] if len(object_data) > 14 else None)
+                dict_navigation["mark-y"].append(object_data[15] if len(object_data) > 15 else None)
             else:
                 # Legacy shorter rows
                 dict_navigation["expected-bbox-area"].append(
@@ -426,6 +460,8 @@ class Collector:
                     dict_navigation["bbox-area"].append(None)
                     dict_navigation["min-side"].append(None)
                     dict_navigation["occupancy-ratio"].append(None)
+                dict_navigation["mark-x"].append(None)
+                dict_navigation["mark-y"].append(None)
 
     def save_image(self, im_path, event):
         cv2.imwrite(im_path, event.cv2img)
@@ -454,6 +490,8 @@ class Collector:
             "visited-rooms": [],
             "seen-rooms": [],
             "obj-id": [],
+            "obj-room": [],
+            "obj-room-type": [],
             "obj-distance": [],
             "cmin": [],
             "rmin": [],
@@ -470,6 +508,8 @@ class Collector:
             "bbox-area": [],
             "min-side": [],
             "occupancy-ratio": [],
+            "mark-x": [],
+            "mark-y": [],
             "path": [],
         }
         for key in self.dict_agent:
@@ -483,6 +523,7 @@ class Collector:
             "obj-id": [],
             "assetId": [],
             "room-id": [],
+            "room-type": [],
             "obj-color": [],
             "obj-pos-x": [],
             "obj-pos-y": [],
@@ -510,6 +551,7 @@ class Collector:
             dict_objects["obj-id"].append(row["obj_id"])
             dict_objects["assetId"].append(row["asset_id"])
             dict_objects["room-id"].append(row["room_id"])
+            dict_objects["room-type"].append(row.get("room_type"))
             dict_objects["obj-color"].append(row["color"])
             self.save_data_by_axis(dict_objects, "obj-pos", row["position"])
             self.save_data_by_axis(dict_objects, "obj-rot", row["rotation"])

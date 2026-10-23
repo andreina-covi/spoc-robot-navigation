@@ -505,12 +505,18 @@ class OnlineEvaluatorWorker:
             task_info = {**task.task_info, **task.task_info["eval_info"]}
             del task_info["eval_info"]
 
+            collector = getattr(task, "collector", None)
+            annotations_dir = getattr(collector, "annotations_dir", None) if collector else None
+
             to_log = dict(
                 iter=num_tasks,
                 task_type=task_info["task_type"],
                 worker_id=self.worker_id,
                 sample_id=task_info["sample_id"],
                 metrics=sample_result["metrics"],
+                house_index=task_info.get("house_index"),
+                house_split=task_info.get("house_split"),
+                annotations_dir=annotations_dir,
             )
             if verbose:
                 print(to_log)

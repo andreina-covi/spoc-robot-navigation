@@ -11,8 +11,9 @@ Doors and doorways are excluded. A receptacle place is kept only when that
 receptacle is in the object's parentReceptacles. Up to 3 spawn points are
 tried, the ones closest to the receptacle's top face. The object is restored
 only when the place action succeeds. A failed restore reloads the house
-before the next pickupable. Writes
-``placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv``.
+before the next pickupable. The RoomVisit command writes
+``placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`` into that
+episode's ``annotations/`` folder.
 
 The RoomVisit command already has these house indexes on its eval samples.
 After the agent finishes, it passes that list to ``run``.
@@ -76,6 +77,23 @@ def house_name(house_index: int) -> str:
 def candidates_name(house_index: int, split: str, radius_m: float) -> str:
     radius = format(float(radius_m), "g")
     return f"placement_candidates-{house_name(house_index)}-{split}-radius_{radius}.csv"
+
+
+def annotation_dirs_by_house(exports) -> Dict[tuple, List[Path]]:
+    """Map (split, house_index) to the episode annotations folders for that house."""
+    grouped: Dict[tuple, List[Path]] = {}
+    for item in exports:
+        directory = item.get("annotations_dir")
+        raw_index = item.get("house_index")
+        split = item.get("house_split")
+        if not directory or raw_index in (None, "", "unknown") or not split:
+            continue
+        key = (str(split), int(raw_index))
+        path = Path(directory)
+        bucket = grouped.setdefault(key, [])
+        if path not in bucket:
+            bucket.append(path)
+    return grouped
 
 
 def houses_from_samples(samples) -> Dict[str, List[int]]:
@@ -355,10 +373,11 @@ def open_controller() -> StretchController:
 def run(
     split: str,
     house_indices: List[int],
-    output_dir: Path,
+    output_dir: Optional[Path],
     radius_m: float,
     top_n: int,
     top_landmarks: int = TOP_LANDMARKS,
+    output_dirs: Optional[Dict[int, List[Path]]] = None,
 ) -> None:
     if OBJAVERSE_HOUSES_DIR is None:
         raise FileNotFoundError("OBJAVERSE_HOUSES_DIR is not set")
@@ -371,12 +390,26 @@ def run(
             print(f"[placement] loading {name}")
             reset_house(controller, house)
             rows = trials_for_house(controller, house, radius_m, top_n, top_landmarks)
-            path = output_dir / candidates_name(index, split, radius_m)
-            write_csv(path, rows)
+            destinations = _destinations(index, output_dir, output_dirs)
             ok = sum(1 for item in rows if item["success"])
-            print(f"[placement] wrote {path} rows={len(rows)} success={ok}")
+            for dest in destinations:
+                path = dest / candidates_name(index, split, radius_m)
+                write_csv(path, rows)
+                print(f"[placement] wrote {path} rows={len(rows)} success={ok}")
     finally:
         controller.stop()
+
+
+def _destinations(
+    house_index: int,
+    output_dir: Optional[Path],
+    output_dirs: Optional[Dict[int, List[Path]]],
+) -> List[Path]:
+    if output_dirs and house_index in output_dirs:
+        return [Path(path) for path in output_dirs[house_index]]
+    if output_dir is not None:
+        return [Path(output_dir)]
+    raise FileNotFoundError(f"No annotations folder for house {house_index}")
 
 
 def main(argv: Optional[List[str]] = None) -> int:

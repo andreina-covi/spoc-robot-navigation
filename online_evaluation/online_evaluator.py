@@ -90,6 +90,25 @@ class MetricAggregator:
         return len(self.sample_metrics)
 
 
+def episode_exports_from_results(task_type_to_results_list):
+    """Episode annotation folders returned by the workers."""
+    exports = []
+    for results in task_type_to_results_list.values():
+        for info, _video in results:
+            annotations_dir = info.get("annotations_dir")
+            if not annotations_dir:
+                continue
+            exports.append(
+                {
+                    "task_type": info.get("task_type"),
+                    "house_index": info.get("house_index"),
+                    "house_split": info.get("house_split"),
+                    "annotations_dir": annotations_dir,
+                }
+            )
+    return exports
+
+
 def merge_current_metric_to_metric_aggregate_dict(metric_aggregate_dict, current_metric_value_dict):
     for k, v in current_metric_value_dict.items():
         if k not in metric_aggregate_dict:
@@ -241,6 +260,7 @@ class OnlineEvaluatorManager:
 
         self.logging_sensor = VideoLogging()
         self.wandb = preset_wandb
+        self.episode_exports = []
 
         if self.eval_subset in ["train", "val"]:
             assert len(self.list_of_tasks) == 1, "we do not support more than one for this option"
@@ -594,6 +614,7 @@ class OnlineEvaluatorManager:
 
         # Log whatever we found
         self.log_from_task_type_lists(task_type_to_results_list, upload=True)
+        self.episode_exports = episode_exports_from_results(task_type_to_results_list)
 
     def log_from_task_type_lists(
         self,

@@ -117,6 +117,29 @@ def test_candidates_name_includes_split_and_radius():
     )
 
 
+def test_annotation_dirs_follow_the_episode_folder():
+    from pathlib import Path
+
+    from scripts.placement_trials import annotation_dirs_by_house
+
+    exports = [
+        {
+            "house_index": 65,
+            "house_split": "val",
+            "annotations_dir": "/episodes/one/annotations",
+        },
+        {
+            "house_index": "1030",
+            "house_split": "val",
+            "annotations_dir": "/episodes/two/annotations",
+        },
+        {"house_index": 65, "house_split": "val", "annotations_dir": None},
+    ]
+    grouped = annotation_dirs_by_house(exports)
+    assert grouped[("val", 65)] == [Path("/episodes/one/annotations")]
+    assert grouped[("val", 1030)] == [Path("/episodes/two/annotations")]
+
+
 def test_houses_from_samples_keeps_unique_indexes():
     from scripts.placement_trials import houses_from_samples
 

@@ -52,12 +52,11 @@ Path: `$OBJAVERSE_NAVIGATION_PATH/`
 
 ```text
 $OBJAVERSE_NAVIGATION_PATH/
-  placement_trials/
-    placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv
   <timestamp>/                            # one episode
     images/
     annotations/
       navigation-house_XXXXXX.csv
+      placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv
       ...
 ```
 
@@ -76,6 +75,7 @@ Each episode root has **two** sibling folders:
     world_layout-house_XXXXXX.json
     nav_graph-house_XXXXXX.json
     episode_meta-house_XXXXXX.json
+    placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv
 ```
 
 **Do not** repeat `episode_id` / `scene_id` / `episode_kind` on every CSV row. Those live in `annotations/episode_meta-*.json` and the folder name. Consumers should join on folder + `timestep` / `obj-id` / `node_id`. Navigation `path` columns still point at files under `images/`.
@@ -128,9 +128,10 @@ python scripts/summarize_episode_export.py --run_dir "$OBJAVERSE_NAVIGATION_PATH
 | Output | Objects included |
 |--------|------------------|
 | `navigation-*.csv` | Non-structural FOV objects with `visible-pixels > 0`, including numeric ids such as `6|5`. Each step has `ag-action`, `action_success` (`lastActionSuccess`), and the agent pose after that action. |
-| `objects-*.csv` | Catalog of those FOV objects. `obj-id` is unchanged. `obj-type` and `obj-synset` are filled at export (`describe_object`). Also `assetId`, `room-id`, and the axis-aligned box `aabb-min-*` / `aabb-max-*`. |
+| `objects-*.csv` | Catalog of those FOV objects. `obj-id` is unchanged. `obj-type` and `obj-synset` are filled at export (`describe_object`). Also `assetId`, `room-id`, `room-type` (the room that contains the object, not the agent), and the axis-aligned box `aabb-min-*` / `aabb-max-*`. |
 | `object_state-*.csv` | **Pickupable** objects tracked after nav mask pixels at least once |
 | `current-room` (in `navigation-*.csv`) | **Agent–room** membership (do **not** treat Floor/Wall as the room object) |
+| `obj-room`, `obj-room-type` (in `navigation-*.csv`) | Room id and room type of the **object**, from its position |
 
 **Export vs filter (recommended policy):**
 
@@ -152,6 +153,7 @@ python scripts/summarize_episode_export.py --run_dir "$OBJAVERSE_NAVIGATION_PATH
 | `bbox-area` | Detection box area `(cmax-cmin)*(rmax-rmin)` |
 | `min-side` | `min(width, height)` of the detection bbox |
 | `occupancy-ratio` | `visible-pixels / bbox-area` |
+| `mark-x`, `mark-y` | Full-image pixel farthest from the edge of that same mask crop |
 
 Example post-process keep rule: apply your own cutoffs on
 `visible-pixels` / `min-side` / `occupancy-ratio`.
@@ -162,7 +164,8 @@ not in `navigation` for that step. Hidden pickupables appear only in `object_sta
 
 **Spatial relations (post-processing):**
 - Agent ↔ object: use `navigation` rows + agent pose vs object pose / bbox.
-- Agent ↔ room: use `current-room` / `region_trajectory` (and `world_layout`), not structural mesh rows.
+- Agent ↔ room: use `current-room` / `current-room-type` (and `world_layout`), not structural mesh rows.
+- Object ↔ room: use `obj-room` / `obj-room-type` on the navigation row, or `room-id` / `room-type` in `objects-*.csv`. These follow the object's position, which can differ from the agent's room.
 - Agent ↔ navigable map: snap poses to `nav_graph` nodes; do **not** replace the trajectory with a shortest path on that graph.
 
 ### Important columns
@@ -177,11 +180,11 @@ not in `navigation` for that step. Hidden pickupables appear only in `object_sta
 Tracking starts when a **pickupable** first has mask pixels in the agent camera.
 HousePlant / Fridge / counters / windows stay in `navigation` only.
 
-**`placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`** is written by `scripts/placement_trials.py`, not by the navigation episode. `anchor-id` is the receptacle id or the landmark id. `anchor-kind` is `receptacle` or `floor`. `pos-*` is the resolved pose when `success` is true. A successful place is restored before the next anchor. Episodes collected before this change may still contain `displacement_events`, `displacement_candidates`, and `displacement_debug`; those files are not written now.
+**`placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`** is written into that episode's `annotations/` folder by `scripts/placement_trials.py` after navigation. `anchor-id` is the receptacle id or the landmark id. `anchor-kind` is `receptacle` or `floor`. `pos-*` is the resolved pose when `success` is true. A successful place is restored before the next anchor. Episodes collected before this change may still contain `displacement_events`, `displacement_candidates`, and `displacement_debug`; those files are not written now.
 
-**`navigation-*.csv`:** one row group per step with `ag-action`, `action_success` (`lastActionSuccess`), and `ag-pos-*` / `ag-rot-*` after the action. Object rows are added only when `visible-pixels > 0`. Numeric ids are included. Hidden tracked pickupables stay in `object_state`.
+**`navigation-*.csv`:** one row group per step with `ag-action`, `action_success` (`lastActionSuccess`), and `ag-pos-*` / `ag-rot-*` after the action. `current-room` and `current-room-type` are the agent's room. `obj-room` and `obj-room-type` are the room that contains that object. Object rows are added only when `visible-pixels > 0`. Numeric ids are included. Hidden tracked pickupables stay in `object_state`.
 
-**`objects-*.csv`:** one row per unique exported object. `obj-id` is the THOR id, including values like `6|5`. `obj-type` and `obj-synset` come from `describe_object`. `aabb-min-*` / `aabb-max-*` are the 3D axis-aligned corners. `room-id` is the room that contains the object.
+**`objects-*.csv`:** one row per unique exported object. `obj-id` is the THOR id, including values like `6|5`. `obj-type` and `obj-synset` come from `describe_object`. `aabb-min-*` / `aabb-max-*` are the 3D axis-aligned corners. `room-id` and `room-type` are the room that contains the object.
 
 **`world_layout-*.json`:** each region has `polygon` (floor outline) and `area` (square meters on xz). `doors` and `passage_state` record each door once at the start, including whether it is open.
 
@@ -193,7 +196,7 @@ HousePlant / Fridge / counters / windows stay in `navigation` only.
 
 The RoomVisit command already knows the house indexes: they are the `house_id` values on the eval samples. After the agent finishes, that same command passes those indexes to the placement trials. Nothing is written just to remember the indexes.
 
-The CSV is `$OBJAVERSE_NAVIGATION_PATH/placement_trials/placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`. The radius is `--floor_radius_m` on the RoomVisit command.
+The CSV is written next to the other episode files: `$OBJAVERSE_NAVIGATION_PATH/<timestamp>/annotations/placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`. The radius is `--floor_radius_m` on the RoomVisit command.
 
 For each pickupable:
 
@@ -273,7 +276,7 @@ export RUN="$OBJAVERSE_NAVIGATION_PATH/<timestamp>"
 export SCENE=house_XXXXXX   # from filenames
 
 cat "$RUN/annotations/episode_meta-${SCENE}.json"
-# Inspect placement_trials/placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv
+# Inspect $RUN/annotations/placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv
 ```
 
 Legacy spatial QA (`spatial_data_generation.py`, `qa_generator.py`) still consumes nav/objects CSVs (now under `annotations/`). Placement trials are the per-house `placement_candidates` file.
@@ -305,6 +308,7 @@ Example past run that used the old displacement register:
 
 - `build_world_layout()` → rooms (polygon and area), doors as passages, landmark heuristics, connectivity.
 - Agent room each step: `navigation-*.csv` columns `current-room`, `current-room-type`, `room-just-entered`.
+- Object room: `obj-room` and `obj-room-type` on each navigation object row, and `room-id` / `room-type` in `objects-*.csv`. These come from the object's position.
 - `passage_state` and `doors` record each door once, including `is_open`. RoomVisit does not open or close doors, so there is no change log.
 - `nav_graph-*.json` from `GetReachablePositions` (start + end); see § output layout.
 

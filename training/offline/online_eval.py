@@ -208,17 +208,29 @@ def main(args):
     evaluator.evaluate(agent_class, agent_input)
 
     if "RoomVisit" in list_of_tasks:
-        from pathlib import Path
-
-        from scripts.placement_trials import houses_from_samples, run as run_placement_trials
-        from utils.constants.objaverse_data_dirs import OBJAVERSE_NAVIGATION_PATH
+        from scripts.placement_trials import (
+            annotation_dirs_by_house,
+            houses_from_samples,
+            run as run_placement_trials,
+        )
         from utils.placement_anchors import TOP_RECEPTACLES
 
         samples = evaluator.eval_samples.get("RoomVisit", [])
-        output = Path(OBJAVERSE_NAVIGATION_PATH) / "placement_trials"
+        episode_dirs = annotation_dirs_by_house(evaluator.episode_exports)
         for split, indexes in houses_from_samples(samples).items():
+            missing = [index for index in indexes if (split, index) not in episode_dirs]
+            if missing:
+                raise FileNotFoundError(
+                    f"No episode annotations folder for {split} houses {missing}"
+                )
+            output_dirs = {index: episode_dirs[(split, index)] for index in indexes}
             run_placement_trials(
-                split, indexes, output, args.floor_radius_m, TOP_RECEPTACLES
+                split,
+                indexes,
+                None,
+                args.floor_radius_m,
+                TOP_RECEPTACLES,
+                output_dirs=output_dirs,
             )
 
 

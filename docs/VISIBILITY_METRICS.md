@@ -4,7 +4,8 @@ These columns describe how much of each object is visible in the **nav camera** 
 Collection exports **non-structural** FOV detections that have at least one
 mask pixel, including numeric ids such as `6|5`. It does **not** hard-filter on
 size or occupancy. Post-processing decides keep/drop using `visible-pixels`,
-`min-side`, and `occupancy-ratio`.
+`min-side`, and `occupancy-ratio`. `mark-x` / `mark-y` name the mask pixel
+farthest from the mask edge.
 
 Wall, Floor, Ceiling, and Room are dropped at collection via `is_exportable_object`.
 
@@ -90,7 +91,14 @@ visible-pixels   →  “how many mask pixels do I see?”
 bbox-area        →  “how large is the detection box?”
 min-side         →  “is this just a thin edge peek?”
 occupancy-ratio  →  “how full is the box with real object pixels?”
+mark-x, mark-y   →  “which mask pixel is farthest from the mask edge?”
 ```
+
+`mark-x` and `mark-y` are computed from the same crop used for `visible-pixels`
+(`np.all(crop == color, axis=2)`). The pixel is the maximum of
+`cv2.distanceTransform` on that mask, with a one-pixel zero border so the crop
+edge counts, shifted by the bbox origin into full-image coordinates. No extra
+image is rendered.
 
 ---
 

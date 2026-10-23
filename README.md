@@ -51,7 +51,7 @@ This sets (edit paths in `configure_variables.sh` if needed):
 1. A pickupable is tracked the first time it has nav-camera mask pixels. Masks render on every agent step.
 2. On episode end (`done` or `max_steps`), logs are saved under `$OBJAVERSE_NAVIGATION_PATH/<timestamp>/` with `images/` and `annotations/`.
 
-Placement trials run in that same command, after the agent finishes. The house indexes are the ones already on the eval samples; they are passed in memory. Pass `--floor_radius_m`. The command writes `$OBJAVERSE_NAVIGATION_PATH/placement_trials/placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`. Each pickupable is tried on floor points within that radius of landmarks in its room and on the 5 largest non-openable receptacles in that room. Landmarks are the 5 largest non-pickupable, non-structural objects whose box bottom is within 0.1 m of the floor, including Objaverse instances. Doors and doorways are excluded. A receptacle place is kept only when that receptacle is a parent of the object; up to 3 spawn points nearest the top of the receptacle are tried. Each CSV row includes `radius_m` and `parent-receptacle`.
+Placement trials run in that same command, after the agent finishes. The house indexes are the ones already on the eval samples; they are passed in memory. Pass `--floor_radius_m`. The command writes `$OBJAVERSE_NAVIGATION_PATH/<timestamp>/annotations/placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`, next to the other episode files. Each pickupable is tried on floor points within that radius of landmarks in its room and on the 5 largest non-openable receptacles in that room. Landmarks are the 5 largest non-pickupable, non-structural objects whose box bottom is within 0.1 m of the floor, including Objaverse instances. Doors and doorways are excluded. A receptacle place is kept only when that receptacle is a parent of the object; up to 3 spawn points nearest the top of the receptacle are tried. Each CSV row includes `radius_m` and `parent-receptacle`.
 
 Run it:
 
@@ -76,8 +76,6 @@ Increase `--eval_set_size` for more episodes. Details, schemas, and QA recipes: 
 
 ```text
 $OBJAVERSE_NAVIGATION_PATH/
-  placement_trials/
-    placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv
   <MM_DD_YYYY_HH_MM_SS_ffffff>/
     images/                                 # RGB frames (img_<t>.png)
     annotations/                            # all CSV + JSON for the episode
@@ -89,13 +87,14 @@ $OBJAVERSE_NAVIGATION_PATH/
       world_layout-house_XXXXXX.json
       nav_graph-house_XXXXXX.json           # AI2-THOR reachability (≠ SPOC path)
       episode_meta-house_XXXXXX.json        # episode_id, episode_kind, counts
+      placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv
 ```
 
 Scene tag is `house_<index>` (not `Procedural`). Episode identity is the **folder** + `annotations/episode_meta` (not repeated on every CSV row).
 
 **SPOC trajectory vs THOR navigability:** `navigation-*.csv` is the exact agent rollout (actions, success/fail, poses). `nav_graph-*.json` is environment reachability from `GetReachablePositions` (nodes + grid-adjacency edges), snapshotted at episode start and end. Do **not** treat the SPOC path as optimal.
 
-Visibility columns on each navigation object row (`visible-pixels`, `bbox-area`, `min-side`, `occupancy-ratio`): see **[docs/VISIBILITY_METRICS.md](docs/VISIBILITY_METRICS.md)**.
+Visibility columns on each navigation object row (`visible-pixels`, `bbox-area`, `min-side`, `occupancy-ratio`, `mark-x`, `mark-y`): see **[docs/VISIBILITY_METRICS.md](docs/VISIBILITY_METRICS.md)**.
 
 Summarize one export:
 
@@ -116,7 +115,7 @@ export SCENE=house_XXXXXX
 cat "$RUN/annotations/episode_meta-${SCENE}.json"
 ```
 
-Placement trials from that same command are `placement_trials/placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`. The house indexes come from the eval samples.
+Placement trials from that same command are `$RUN/annotations/placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`. The house indexes come from the eval samples.
 `success` marks a place that was read and then restored.
 Full review snippets: [docs/DATA_COLLECTION.md](docs/DATA_COLLECTION.md) §§7–8.
 
