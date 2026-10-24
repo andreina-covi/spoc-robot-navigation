@@ -84,6 +84,26 @@ $$
 
 ---
 
+## 5. `mark-x`, `mark-y`
+
+**Meaning:** full-image coordinates of the mask pixel farthest from the mask edge
+(the most interior visible pixel of that object in the crop).
+
+Computed from the same crop used for `visible-pixels`
+(`np.all(crop == color, axis=2)`). The pixel is the maximum of
+`cv2.distanceTransform` on that mask, with a one-pixel zero border so the crop
+edge counts, shifted by the bbox origin into full-image coordinates:
+
+$$
+\text{mark-x} = cmin + c_{\mathrm{local}},\quad
+\text{mark-y} = rmin + r_{\mathrm{local}}
+$$
+
+No extra image is rendered. Ties take the first maximum in row-major order
+(`np.argmax`).
+
+---
+
 ## Mental model
 
 ```text
@@ -94,21 +114,15 @@ occupancy-ratio  →  “how full is the box with real object pixels?”
 mark-x, mark-y   →  “which mask pixel is farthest from the mask edge?”
 ```
 
-`mark-x` and `mark-y` are computed from the same crop used for `visible-pixels`
-(`np.all(crop == color, axis=2)`). The pixel is the maximum of
-`cv2.distanceTransform` on that mask, with a one-pixel zero border so the crop
-edge counts, shifted by the bbox origin into full-image coordinates. No extra
-image is rendered.
-
 ---
 
 ## Export policy
 
 | Output | Policy |
 |--------|--------|
-| `navigation` / `objects` CSV | Non-structural FOV objects with `visible-pixels > 0`, including numeric ids, plus the metrics |
+| `navigation` / `objects` CSV | Non-structural FOV objects with `visible-pixels > 0`, including numeric ids, plus the metrics and mark |
 | `object_state` | **Pickupables** only; eligibility uses the same mask-pixel signal (`in_camera_fov`) |
-| Keep / drop for training or QA | **Post-processing** using the three metrics above |
+| Keep / drop for training or QA | **Post-processing** using `visible-pixels`, `min-side`, and `occupancy-ratio` (`mark-x` / `mark-y` are location hints, not keep/drop filters) |
 
 Collection does not apply recognizability thresholds beyond ``visible-pixels > 0``
 for nav export. Pickupable tracking uses the same mask-pixel signal

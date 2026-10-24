@@ -14,12 +14,12 @@ Extend SPOC RoomVisit navigation logging so post-processing / **cm-benchmark** c
 
 | Construct | Need |
 |-----------|------|
-| `invisible_displacement` | Per house, each pickupable is trial-placed on floor points within the given radius of landmarks in its room and on the 5 largest non-openable receptacles in that room. Landmarks are the 5 largest non-pickupable, non-structural objects whose box bottom is within 0.1 m of the floor, including Objaverse instances. One spawn per anchor. Restored only when the place succeeds. A failed restore reloads the house before the next pickupable. Rows are `placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv` and include `radius_m`. |
+| `invisible_displacement` | Per house, each pickupable is trial-placed on floor points within the given radius of landmarks in its room and on the 5 largest non-openable receptacles in that room. Landmarks are the 5 largest non-pickupable, non-structural objects whose box bottom is within 0.1 m of the floor, including Objaverse instances. Doors are excluded. One floor spawn per landmark; up to 3 receptacle spawns nearest the top face. A receptacle place is kept only when that receptacle is in `parentReceptacles`. Restored only when the place succeeds. A failed restore reloads the house before the next pickupable. Rows land in the episode `annotations/` folder as `placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv` and include `radius_m` and `parent-receptacle`. |
 | `survey_knowledge` | Multi-room trajectory + layout connectivity / door state |
 
 Facing / intrinsic “front of object” is **out of scope** for this pass.
 
-Episode kind tagged in meta: `invisible_displacement`. One RoomVisit command navigates, records the house indexes, then trial-places objects in those houses. Navigation itself does not move objects.
+Episode kind tagged in meta: `invisible_displacement`. One RoomVisit command navigates, then trial-places objects in those houses. House indexes and each episode's `annotations/` path are passed in memory after eval. Navigation itself does not move objects.
 
 ---
 
@@ -28,10 +28,11 @@ Episode kind tagged in meta: `invisible_displacement`. One RoomVisit command nav
 ```text
 online_eval (RoomVisit)
   └─ for each house in the eval samples
-       RoomVisitTask: agent navigates, Collector writes the episode
+       RoomVisitTask: agent navigates, Collector writes <timestamp>/images + annotations/
+       worker returns annotations_dir with the sample result
   └─ after the agent finishes
-       pass those sample house indexes to placement trials
-       write placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv
+       pass house indexes + those annotations/ paths to placement trials
+       write placement_candidates-*.csv into each episode's annotations/
 ```
 
 | Module | Role |
@@ -194,9 +195,9 @@ HousePlant / Fridge / counters / windows stay in `navigation` only.
 
 ## 4. Placement trials
 
-The RoomVisit command already knows the house indexes: they are the `house_id` values on the eval samples. After the agent finishes, that same command passes those indexes to the placement trials. Nothing is written just to remember the indexes.
+The RoomVisit command already knows the house indexes (`house_id` on the eval samples) and each episode's `annotations/` folder (returned by the worker). After the agent finishes, that same command passes both to the placement trials. Nothing is written just to remember the indexes.
 
-The CSV is written next to the other episode files: `$OBJAVERSE_NAVIGATION_PATH/<timestamp>/annotations/placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`. The radius is `--floor_radius_m` on the RoomVisit command.
+The CSV is written next to the other episode files: `$OBJAVERSE_NAVIGATION_PATH/<timestamp>/annotations/placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`. The radius is `--floor_radius_m` on the RoomVisit command (required; there is no default). Running `scripts/placement_trials.py` alone still accepts `--output` (default `$OBJAVERSE_NAVIGATION_PATH/placement_trials`) for a manual directory.
 
 For each pickupable:
 
@@ -264,6 +265,7 @@ python -m training.offline.online_eval --shuffle --eval_subset minival \
   --output_basedir /home/andreina/Documents/Programs/Dataset/logs \
   --test_augmentation --task_type RoomVisit \
   --eval_set_size 1 \
+  --floor_radius_m 1.2 \
   --input_sensors raw_navigation_camera raw_manipulation_camera last_actions an_object_is_in_hand \
   --house_set objaverse --wandb_logging False --num_workers 1 \
   --gpu_devices 0 \
@@ -279,19 +281,19 @@ cat "$RUN/annotations/episode_meta-${SCENE}.json"
 # Inspect $RUN/annotations/placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv
 ```
 
-Legacy spatial QA (`spatial_data_generation.py`, `qa_generator.py`) still consumes nav/objects CSVs (now under `annotations/`). Placement trials are the per-house `placement_candidates` file.
+Legacy spatial QA (`spatial_data_generation.py`, `qa_generator.py`) still consumes nav/objects CSVs (now under `annotations/`). Placement trials for a RoomVisit run are the `placement_candidates-*.csv` file in that same `annotations/` folder.
 
 ---
 
 ## 8. Building QA from placement trials
 
-**Placement file:** `placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv` from `scripts/placement_trials.py`. `anchor-id` / `anchor-kind` name the receptacle or the landmark whose floor point was tried. `pos-*` is the resolved pose when `success` is true. A successful place is restored before the next anchor.
+**Placement file:** `$RUN/annotations/placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv` from `scripts/placement_trials.py`. `anchor-id` / `anchor-kind` name the receptacle or the landmark whose floor point was tried. `pos-*` is the resolved pose when `success` is true. `parent-receptacle` lists parent ids after a receptacle place. A successful place is restored before the next anchor.
 
 Do **not** expect egocentric direction columns at collection time; compute those later from an agent pose in the navigation CSV.
 
 ### Validator pattern
 
-For a house, each pickupable has up to five receptacle rows and one floor row per landmark that has a spawn within the requested radius. `success` is true when `PlaceObjectAtPoint` succeeded. The original pose is restored only in that case. A failed restore reloads the house before the next pickupable.
+For a house, each pickupable has up to five receptacle rows and one floor row per landmark that has a spawn within the requested radius. Floor `success` is true when `PlaceObjectAtPoint` succeeded. Receptacle `success` also requires that receptacle id in `parentReceptacles` (up to 3 nearest top-face spawns are tried). The original pose is restored only when the place action succeeds. A failed restore reloads the house before the next pickupable.
 
 ### Example item types
 

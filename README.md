@@ -7,7 +7,7 @@ It introduces new modules for spatial-semantic grounding, map-based navigation, 
 
 → **[docs/DATA_COLLECTION.md](docs/DATA_COLLECTION.md)** — design of `Collector`, RoomVisit placement trials, output schemas, performance notes, and QA usage.
 
-→ **[docs/VISIBILITY_METRICS.md](docs/VISIBILITY_METRICS.md)** — how `visible-pixels`, `bbox-area`, `min-side`, and `occupancy-ratio` are calculated.
+→ **[docs/VISIBILITY_METRICS.md](docs/VISIBILITY_METRICS.md)** — how `visible-pixels`, `bbox-area`, `min-side`, `occupancy-ratio`, and `mark-x` / `mark-y` are calculated.
 
 ---
 
@@ -94,7 +94,7 @@ Scene tag is `house_<index>` (not `Procedural`). Episode identity is the **folde
 
 **SPOC trajectory vs THOR navigability:** `navigation-*.csv` is the exact agent rollout (actions, success/fail, poses). `nav_graph-*.json` is environment reachability from `GetReachablePositions` (nodes + grid-adjacency edges), snapshotted at episode start and end. Do **not** treat the SPOC path as optimal.
 
-Visibility columns on each navigation object row (`visible-pixels`, `bbox-area`, `min-side`, `occupancy-ratio`, `mark-x`, `mark-y`): see **[docs/VISIBILITY_METRICS.md](docs/VISIBILITY_METRICS.md)**.
+Visibility columns on each navigation object row (`visible-pixels`, `bbox-area`, `min-side`, `occupancy-ratio`, `mark-x`, `mark-y`): see **[docs/VISIBILITY_METRICS.md](docs/VISIBILITY_METRICS.md)**. Agent room is `current-room` / `current-room-type`. Object room is `obj-room` / `obj-room-type` on the same row (and `room-id` / `room-type` in `objects-*.csv`).
 
 Summarize one export:
 
