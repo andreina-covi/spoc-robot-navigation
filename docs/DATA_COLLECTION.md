@@ -184,6 +184,9 @@ HousePlant / Fridge / counters / windows stay in `navigation` only.
 **`placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`** is written into that episode's `annotations/` folder by `scripts/placement_trials.py` after navigation. `anchor-id` is the receptacle id or the landmark id. `anchor-kind` is `receptacle` or `floor`. `pos-*` is the resolved pose when `success` is true. A successful place is restored before the next anchor. Episodes collected before this change may still contain `displacement_events`, `displacement_candidates`, and `displacement_debug`; those files are not written now.
 
 **`navigation-*.csv`:** one row group per step with `ag-action`, `action_success` (`lastActionSuccess`), and `ag-pos-*` / `ag-rot-*` after the action. `current-room` and `current-room-type` are the agent's room. `obj-room` and `obj-room-type` are the room that contains that object. Object rows are added only when `visible-pixels > 0`. Numeric ids are included. Hidden tracked pickupables stay in `object_state`.
+`scripted-glance` is true on frames inserted by the open-loop glance (not chosen by the policy), and `glance-obj-id` names the object looked at. Consumers that replay the agent's route (cm-benchmark class 4) must skip those frames.
+
+**`episode_meta-*.json`:** `collection_config` is the `configs/collection.yaml` used for the run. `glances` lists each glance (`object_id`, `policy_step`, `first_timestep`, `turns`, `bearing_deg`, `distance_m`, `expected_px`). `save_reason` is `done`, `max_steps` or `timeout`, and `truncated` is true on a timeout.
 
 **`objects-*.csv`:** one row per unique exported object. `obj-id` is the THOR id, including values like `6|5`. `obj-type` and `obj-synset` come from `describe_object`. `aabb-min-*` / `aabb-max-*` are the 3D axis-aligned corners. `room-id` and `room-type` are the room that contains the object.
 
@@ -203,8 +206,8 @@ For each pickupable:
 
 1. Floor: the closest floor spawn within that radius of each landmark in its room. Landmarks are the 5 largest non-pickupable, non-structural objects whose box bottom is within 0.1 m of the floor height, including Objaverse instances. Doors and doorways are excluded. A room with no floor uses the lowest floor height in the house. `--top_landmarks` changes that count. One point per landmark. Object poses are read after 10 physics steps.
 2. Receptacles: the 5 largest non-openable receptacles in that room (`receptacle_salience` is the axis-aligned box volume). Floor, wall, ceiling, room, and openable receptacles are excluded.
-3. Up to 3 spawn coordinates per receptacle, the ones closest to the center of its top face. Spawn lists are cached per receptacle. One floor spawn per landmark.
-4. `PlaceObjectAtPoint` with `forceKinematic`. A receptacle row is `success` only when that receptacle is in `parentReceptacles` after the place. `parent-receptacle` records those ids. The original pose is restored only when the place action succeeds. If the restore fails, the house is reloaded before the next pickupable.
+3. Up to `max_receptacle_spawns` spawn coordinates per receptacle, closest to the center of its top face and at least `min_spawn_separation_m` apart (adjacent points are all blocked by the same object). Spawn lists are cached per receptacle. One floor spawn per landmark.
+4. `PlaceObjectAtPoint` with `forceKinematic`. It places the object's position (pivot), not its bottom, so every target is raised by the object's pivot-to-bottom height plus `lift_epsilon_m`; without this the object intersects the surface ("Spawn area not clear"). Settings are under `placement:` in `configs/collection.yaml`. A receptacle row is `success` only when that receptacle is in `parentReceptacles` after the place. `parent-receptacle` records those ids. The original pose is restored only when the place action succeeds. If the restore fails, the house is reloaded before the next pickupable.
 5. Columns: `obj-id`, `anchor-id`, `anchor-kind` (`receptacle` or `floor`), `pos-*`, `success`, `radius_m`, `parent-receptacle`. The split and radius are also in the file name.
 
 ---
@@ -231,6 +234,15 @@ Mitigations already in code:
   the agent never takes `done`.
 - **Incremental CSV flush** every `flush_every` (default 50) steps for navigation /
   doors / object_state so RAM stays bounded.
+- **Open-loop glance** (`utils/glance.py`, settings in `configs/collection.yaml`):
+  pickupable positions and sizes are read once at episode start. Each step runs one
+  numpy distance/bearing computation, with no rendering and no simulator call.
+  A glance turns a fixed number of 45° steps toward one object (at most `max_turns`),
+  then turns back. It never loops until the object is visible; the 1% frame check
+  happens offline in cm-benchmark. Limits: one glance per object, `max_per_episode`,
+  `min_steps_between`. Glance frames are added to the `max_steps` frame budget.
+- **Wall-clock timeout** (`episode.timeout_s`): the episode saves with
+  `save_reason="timeout"` and ends.
 - **FOV synthesis**: `renderInstanceSegmentation=True` at controller init, and
   per-step `renderImageSynthesis` is true on every agent step (stride 1). When
   synthesis is off, THOR may leave stale `instance_detections2D` on `last_event`.

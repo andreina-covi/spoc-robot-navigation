@@ -1,3 +1,4 @@
+import time
 from typing import Any, Dict, List, Optional, Set
 
 import numpy as np
@@ -19,6 +20,13 @@ from utils.constants.stretch_initialization_utils import (
     AGENT_ROTATION_DEG,
 )
 from utils.mask_stride import mask_render_stride
+from utils.collection_config import load_collection_config
+from utils.glance import (
+    GlancePlanner,
+    GlanceSettings,
+    GlanceTarget,
+    is_hidden_in_closed_receptacle,
+)
 from utils.nav_graph_export import (
     build_nav_graph_from_reachable_positions,
     reachability_grid_size,
@@ -116,13 +124,22 @@ class RoomVisitTask(AbstractSPOCTask):
         self.collector.set_world_layout(self.build_world_layout())
         self._export_nav_graph_snapshot("episode_start")
         self._pickupable_ids: Optional[Set[str]] = None
+        self._collection_cfg = load_collection_config()
+        self.collector.collection_config = self._collection_cfg
+        self._episode_start_s = time.monotonic()
+        glance_cfg = self._collection_cfg["glance"]
+        self._glance_settings = (
+            GlanceSettings.from_config(glance_cfg) if glance_cfg["enabled"] else None
+        )
+        self._glance_planner: Optional[GlancePlanner] = None  # built on first step
         self.stride = mask_render_stride(collector_max_steps, ROOM_VISIT_HORIZON)
         self._sync_collector_horizon()
 
     def _sync_collector_horizon(self):
         """Keep collector max_steps / FOV stride / nav camera params in sync."""
         if self.max_steps is not None and self.max_steps > 0:
-            self.collector.max_steps = self.max_steps
+            # Glance frames are extra; budget them so the policy's frames are kept
+            self.collector.max_steps = self.max_steps + self._glance_frame_budget()
         self.stride = mask_render_stride(self.max_steps, ROOM_VISIT_HORIZON)
         self.collector.fov_stride = self.stride
         # Actual RotateCameraMount / FOV from StretchController.calibrate_agent
@@ -459,6 +476,151 @@ class RoomVisitTask(AbstractSPOCTask):
                 continue
         return result
 
+    def _glance_frame_budget(self) -> int:
+        s = getattr(self, "_glance_settings", None)
+        if s is None:
+            return 0
+        return s.max_per_episode * s.max_turns * (2 if s.rotate_back else 1)
+
+    def _build_glance_planner(self) -> GlancePlanner:
+        """Read pickupable positions and sizes once (they do not move in RoomVisit)."""
+        with self.controller.include_object_metadata_context():
+            all_objs = [
+                dict(o) for o in self.controller.controller.last_event.metadata["objects"]
+            ]
+        by_id = {o["objectId"]: o for o in all_objs}
+        objects = []
+        for o in all_objs:
+            if not o.get("pickupable", False) or is_hidden_in_closed_receptacle(o, by_id):
+                continue
+            box = o.get("axisAlignedBoundingBox") or {}
+            size = box.get("size") or {}
+            center = box.get("center") or o.get("position")
+            if not size or not center:
+                continue
+            objects.append(
+                {
+                    "id": o["objectId"],
+                    "x": float(center["x"]),
+                    "z": float(center["z"]),
+                    "width": max(float(size["x"]), float(size["z"])),
+                    "height": float(size["y"]),
+                    "room": room_id_at(self.room_poly_map, o.get("position")),
+                }
+            )
+        return GlancePlanner(
+            objects,
+            self._glance_settings,
+            frame_width=Collector.FRAME_WIDTH,
+            frame_height=Collector.FRAME_HEIGHT,
+            vertical_fov_deg=self.collector.nav_camera_fov_deg,
+            rotation_deg=AGENT_ROTATION_DEG,
+        )
+
+    def _log_frame(
+        self,
+        event,
+        action_str: str,
+        render_mask_this_step: bool,
+        scripted_glance: bool = False,
+        glance_obj_id: Optional[str] = None,
+    ) -> None:
+        """Write one navigation row (+ object state) for the frame in ``event``."""
+        if self.collector.at_capacity:
+            return
+        current_room = self.get_current_room()
+        room_info = {
+            "current_room": current_room,
+            "current_room_type": (
+                self.room_type_dict.get(current_room) if current_room is not None else None
+            ),
+            "seen_rooms": list(self.seen_rooms),
+        }
+
+        # Navigation CSV: only objects with mask pixels in this frame.
+        # Hidden pickupables stay in object_state, not in navigation.
+        by_id = {}
+        include_detections = False
+        if render_mask_this_step:
+            detections = event.instance_detections2D
+            if event.instance_segmentation_frame is not None and detections is not None:
+                include_detections = True
+                export_dets = self.collector.filter_export_detections(detections or {})
+                for o in self._gather_fov_all_objects(export_dets):
+                    by_id[o["objectId"]] = o
+        objects = list(by_id.values())
+
+        # Mask pixels are recorded on every step.
+        if include_detections:
+            in_image_pickupables = self._gather_pickupables_in_image(event)
+            self.collector.update_visibility_tracking(in_image_pickupables)
+
+        object_states = self._build_object_state_rows()
+
+        self.collector.collect_data(
+            event,
+            action_str,
+            objects,
+            self.controller.controller,
+            room_info=room_info,
+            action_success=bool(event.metadata.get("lastActionSuccess", False)),
+            held_obj_id=self._get_held_obj_id(),
+            object_states=object_states,
+            include_detections=include_detections,
+            scripted_glance=scripted_glance,
+            glance_obj_id=glance_obj_id,
+        )
+
+    def _maybe_glance(self, event) -> None:
+        """Open-loop glance: fixed turns toward one nearby movable object, then back."""
+        if self._glance_settings is None or self.collector.at_capacity:
+            return
+        if self._glance_planner is None:
+            self._glance_planner = self._build_glance_planner()
+        agent = event.metadata["agent"]
+        step = self.num_steps_taken()
+        target = self._glance_planner.pick(
+            agent_x=float(agent["position"]["x"]),
+            agent_z=float(agent["position"]["z"]),
+            yaw_deg=float(agent["rotation"]["y"]),
+            room=self.get_current_room(),
+            step=step,
+        )
+        if target is None:
+            return
+        self._glance_planner.mark_done(target, step)
+        first_frame = self.collector.timestep
+        self._run_glance_turns(target, target.turns)
+        if self._glance_settings.rotate_back:
+            self._run_glance_turns(target, -target.turns)
+        self.collector.glances.append(
+            {
+                "object_id": target.object_id,
+                "policy_step": step,
+                "first_timestep": first_frame,
+                "turns": target.turns,
+                "bearing_deg": round(target.bearing_deg, 1),
+                "distance_m": round(target.distance_m, 2),
+                "expected_px": round(target.expected_px),
+            }
+        )
+
+    def _run_glance_turns(self, target: GlanceTarget, turns: int) -> None:
+        action_str = THORActions.rotate_right if turns > 0 else THORActions.rotate_left
+        for _ in range(abs(turns)):
+            event = self.controller.agent_step(action=action_str, render_image_synthesis=True)
+            self._log_frame(
+                event,
+                action_str,
+                render_mask_this_step=True,
+                scripted_glance=True,
+                glance_obj_id=target.object_id,
+            )
+
+    def _timed_out(self) -> bool:
+        limit = self._collection_cfg["episode"]["timeout_s"]
+        return limit is not None and time.monotonic() - self._episode_start_s > float(limit)
+
     def min_l2_distance_to_target(self):
         distances = self.get_room_distances()
         if len(distances) > 0:
@@ -493,7 +655,14 @@ class RoomVisitTask(AbstractSPOCTask):
         # Eval patches task.max_steps after __init__; keep collector + FOV stride in sync
         self._sync_collector_horizon()
 
-        if action_str == THORActions.done:
+        if not self._took_end_action and self._timed_out():
+            # Wall-clock limit: keep what was collected and end the episode
+            self._took_end_action = True
+            self._success = False
+            self.last_action_success = False
+            self._export_nav_graph_snapshot("episode_end")
+            self.collector.save_data(reason="timeout")
+        elif action_str == THORActions.done:
             self._took_end_action = True
             self._success = self.successful_if_done()
             self.last_action_success = self._success
@@ -518,54 +687,8 @@ class RoomVisitTask(AbstractSPOCTask):
             )
             self.last_action_success = bool(event.metadata.get("lastActionSuccess", False))
 
-            if not self.collector.at_capacity:
-                current_room = self.get_current_room()
-                room_info = {
-                    "current_room": current_room,
-                    "current_room_type": (
-                        self.room_type_dict.get(current_room)
-                        if current_room is not None
-                        else None
-                    ),
-                    "seen_rooms": list(self.seen_rooms),
-                }
-
-                # Navigation CSV: only objects with mask pixels in this frame.
-                # Hidden pickupables stay in object_state, not in navigation.
-                by_id = {}
-                include_detections = False
-                if render_mask_this_step:
-                    detections = event.instance_detections2D
-                    if (
-                        event.instance_segmentation_frame is not None
-                        and detections is not None
-                    ):
-                        include_detections = True
-                        export_dets = self.collector.filter_export_detections(
-                            detections or {}
-                        )
-                        for o in self._gather_fov_all_objects(export_dets):
-                            by_id[o["objectId"]] = o
-                objects = list(by_id.values())
-
-                # Mask pixels are recorded on every step.
-                if include_detections:
-                    in_image_pickupables = self._gather_pickupables_in_image(event)
-                    self.collector.update_visibility_tracking(in_image_pickupables)
-
-                object_states = self._build_object_state_rows()
-
-                self.collector.collect_data(
-                    event,
-                    action_str,
-                    objects,
-                    self.controller.controller,
-                    room_info=room_info,
-                    action_success=self.last_action_success,
-                    held_obj_id=self._get_held_obj_id(),
-                    object_states=object_states,
-                    include_detections=include_detections,
-                )
+            self._log_frame(event, action_str, render_mask_this_step)
+            self._maybe_glance(event)
 
             position = self.controller.get_current_agent_position()
             self.path.append(position)

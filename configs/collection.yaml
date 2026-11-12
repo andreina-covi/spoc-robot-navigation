@@ -1,0 +1,47 @@
+# Collection settings for RoomVisit / invisible_displacement episodes.
+# Every tunable number used by the collector lives here. Change values here only.
+# Robot motion (turn angle, step length) and the camera stay in
+# utils/constants/stretch_initialization_utils.py; this file never repeats them.
+
+episode:
+  # Wall-clock limit per episode (seconds). On timeout the collector saves what it
+  # has (save_reason "timeout", truncated true) and the episode ends.
+  # Round 3 (10 houses, local GPU): longest episode 112 s, ~0.2 s/step. 600 s ≈ 5x.
+  timeout_s: 600
+
+glance:
+  # Open-loop glance at nearby movable objects so the ID construct gets a clear
+  # encode sighting. Turn a fixed number of times, never loop until visible.
+  enabled: true
+  # Area floor the glance aims for: fraction of the frame the object should cover.
+  # Matches cm-benchmark named_min_frame_fraction (1% of 396x224 = 887 px).
+  min_frame_fraction: 0.01
+  # Trigger only when the expected area is at least this multiple of the floor
+  # (margin for occlusion, partial view and the pinhole estimate).
+  area_margin: 1.5
+  # Hard cap on distance (m), whatever the object's size.
+  max_distance_m: 2.5
+  # Turns per glance. With 45° turns, 2 turns cover bearings up to 112.5°;
+  # objects further behind are skipped.
+  max_turns: 2
+  # Turn back to the original heading after the glance, so the policy resumes
+  # from the pose it chose.
+  rotate_back: true
+  # Episode limits: one glance per object, at most this many per episode,
+  # and at least this many policy steps between glances.
+  max_per_episode: 8
+  min_steps_between: 5
+
+placement:
+  # scripts/placement_trials.py: where each pickupable could be moved (ID construct).
+  top_receptacles: 5  # most salient non-openable receptacles tried per room
+  top_landmarks: 5  # floor landmarks per room (also the world_layout landmark list)
+  max_receptacle_spawns: 3  # spawn points tried per receptacle
+  # Points tried on one receptacle are at least this far apart (xz). Adjacent points
+  # (2-4 cm) are all blocked by the same object already standing there.
+  min_spawn_separation_m: 0.25
+  # PlaceObjectAtPoint puts the object's position (its pivot, near the centre) at
+  # the point, so the target is raised by pivot-to-bottom height plus this gap.
+  # Without it the object intersects the surface ("Spawn area not clear").
+  lift_epsilon_m: 0.01
+  physics_settle_steps: 10  # AdvancePhysicsStep calls after a house reload

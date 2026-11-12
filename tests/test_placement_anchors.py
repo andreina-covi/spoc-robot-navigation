@@ -149,3 +149,24 @@ def test_houses_from_samples_keeps_unique_indexes():
         {"house_id": "7514", "house_split": "val"},
     ]
     assert houses_from_samples(samples) == {"val": [7514, 6068]}
+
+
+def test_spread_points_skips_adjacent_spawns():
+    from utils.placement_anchors import spread_points
+
+    pts = [{"x": 0.0, "y": 0.9, "z": 0.0}, {"x": 0.03, "y": 0.9, "z": 0.0},
+           {"x": 0.3, "y": 0.9, "z": 0.0}, {"x": 0.6, "y": 0.9, "z": 0.0}]
+    got = spread_points(pts, {"x": 0.0, "y": 0.9, "z": 0.0}, 3, 0.25)
+    assert [p["x"] for p in got] == [0.0, 0.3, 0.6]
+
+
+def test_place_lift_is_pivot_to_bottom_plus_gap():
+    from utils.placement_anchors import lifted, place_lift
+
+    bread = {
+        "position": {"x": 0, "y": 0.99, "z": 0},
+        "axisAlignedBoundingBox": {"center": {"x": 0, "y": 0.985, "z": 0}, "size": {"x": 0.35, "y": 0.09, "z": 0.16}},
+    }
+    lift = place_lift(bread, 0.01)
+    assert abs(lift - (0.99 - 0.94 + 0.01)) < 1e-9
+    assert abs(lifted({"x": 1, "y": 0.94, "z": 2}, lift)["y"] - 1.0) < 1e-9

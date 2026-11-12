@@ -96,6 +96,9 @@ class Collector:
         self._csv_initialized = set()
         self._truncated = False
         self._save_reason = None
+        # Filled by the task: configs/collection.yaml contents and glance summary
+        self.collection_config = None
+        self.glances = []
 
         self.tracked_objects = {}
         self.world_layout = None
@@ -381,6 +384,8 @@ class Collector:
         dict_navigation["room-just-entered"].append(self.dict_agent[key]["room_just_entered"])
         dict_navigation["visited-rooms"].append(self.dict_agent[key]["visited_rooms"])
         dict_navigation["seen-rooms"].append(self.dict_agent[key]["seen_rooms"])
+        dict_navigation["scripted-glance"].append(self.dict_agent[key].get("scripted_glance", False))
+        dict_navigation["glance-obj-id"].append(self.dict_agent[key].get("glance_obj_id"))
 
     def save_data_navigation(self, dict_navigation, key):
         objects_data = self.dict_agent[key]["objects"]
@@ -489,6 +494,8 @@ class Collector:
             "room-just-entered": [],
             "visited-rooms": [],
             "seen-rooms": [],
+            "scripted-glance": [],
+            "glance-obj-id": [],
             "obj-id": [],
             "obj-room": [],
             "obj-room-type": [],
@@ -777,6 +784,8 @@ class Collector:
         held_obj_id=None,
         object_states=None,
         include_detections=False,
+        scripted_glance=False,
+        glance_obj_id=None,
     ):
         # Truncate like an LLM context window: keep only the first max_steps frames
         if self.at_capacity:
@@ -826,6 +835,9 @@ class Collector:
                 bool(action_success) if action_success is not None else None
             )
             self.dict_agent[key]["held_obj_id"] = held_obj_id
+            # Steps inserted by the open-loop glance, not chosen by the policy
+            self.dict_agent[key]["scripted_glance"] = bool(scripted_glance)
+            self.dict_agent[key]["glance_obj_id"] = glance_obj_id
             # Nav: id+distance every step; bbox/mask only when synthesis ran.
             # Use the nav ``event`` (not last_event) so displace PlaceObject steps
             # cannot wipe stride detections.
@@ -1004,7 +1016,7 @@ class Collector:
             },
             "num_timesteps": self.timestep,
             "max_steps": self.max_steps,
-            "truncated": self._truncated or self.at_capacity,
+            "truncated": self._truncated or self.at_capacity or reason == "timeout",
             "save_reason": reason,
             "num_tracked_objects": len(self.tracked_objects),
             "fov_stride": self.fov_stride,
@@ -1050,6 +1062,8 @@ class Collector:
                 ),
             },
             "motion": self._motion_check(),
+            "collection_config": self.collection_config,
+            "glances": self.glances,
         }
         with open(self._json_path("episode_meta"), "w") as f:
             json.dump(meta, f, indent=2)

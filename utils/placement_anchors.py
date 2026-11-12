@@ -7,9 +7,11 @@ import numpy as np
 from geometry import aabb_bounds
 from utils.constants.object_constants import is_structural_object
 from utils.data_generation_utils.navigation_utils import get_room_id_from_location
+from utils.collection_config import load_collection_config
 
-TOP_RECEPTACLES = 5
-TOP_LANDMARKS = 5
+_PLACEMENT = load_collection_config()["placement"]
+TOP_RECEPTACLES = int(_PLACEMENT["top_receptacles"])
+TOP_LANDMARKS = int(_PLACEMENT["top_landmarks"])
 FLOOR_CONTACT_M = 0.1
 PASSAGE_TYPES = {"Door", "Doorway", "Doorframe"}
 PASSAGE_ID_PREFIXES = ("door|", "doorway|", "doorframe|")
@@ -209,6 +211,44 @@ def nearest_points(points, target: Dict[str, float], limit: int = 3) -> List[Dic
         ranked.append((distance, xyz))
     ranked.sort(key=lambda item: (item[0], item[1]["x"], item[1]["y"], item[1]["z"]))
     return [point for _distance, point in ranked[:limit]]
+
+
+def spread_points(
+    points, target: Dict[str, float], limit: int, min_separation_m: float
+) -> List[Dict[str, float]]:
+    """Up to ``limit`` points, closest to ``target`` first, at least
+    ``min_separation_m`` apart on the floor plane."""
+    chosen: List[Dict[str, float]] = []
+    for point in nearest_points(points, target, len(points)):
+        if all(
+            np.hypot(point["x"] - q["x"], point["z"] - q["z"]) >= min_separation_m
+            for q in chosen
+        ):
+            chosen.append(point)
+            if len(chosen) == limit:
+                break
+    return chosen
+
+
+def place_lift(obj: Dict[str, Any], epsilon_m: float) -> float:
+    """Height from a surface point to where the object's position must go.
+
+    PlaceObjectAtPoint puts the object's position (pivot) at the target, so a
+    surface point must be raised by pivot-to-bottom height, plus a small gap.
+    """
+    box = obj.get("axisAlignedBoundingBox") or {}
+    center, size = box.get("center"), box.get("size")
+    position = obj.get("position")
+    if not (isinstance(center, dict) and isinstance(size, dict) and position):
+        return float(epsilon_m)
+    bottom = float(center["y"]) - abs(float(size["y"])) / 2.0
+    return max(0.0, float(position["y"]) - bottom) + float(epsilon_m)
+
+
+def lifted(point, lift: float) -> Dict[str, float]:
+    xyz = xyz_dict(point)
+    xyz["y"] += lift
+    return xyz
 
 
 def xyz_dict(point) -> Dict[str, float]:
