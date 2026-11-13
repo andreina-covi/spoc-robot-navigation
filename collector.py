@@ -309,6 +309,9 @@ class Collector:
                 "aabb_max": self._xyz(aabb_max),
                 "room_id": obj_dict.get("roomId"),
                 "room_type": obj_dict.get("roomType"),
+                "pickupable": bool(obj_dict.get("pickupable", False)),
+                "moveable": bool(obj_dict.get("moveable", False)),
+                "mass": obj_dict.get("mass"),
             }
 
             dist = float(obj_dict.get("distance") or 0.0)
@@ -531,6 +534,9 @@ class Collector:
             "assetId": [],
             "room-id": [],
             "room-type": [],
+            "pickupable": [],
+            "moveable": [],
+            "mass": [],
             "obj-color": [],
             "obj-pos-x": [],
             "obj-pos-y": [],
@@ -559,6 +565,9 @@ class Collector:
             dict_objects["assetId"].append(row["asset_id"])
             dict_objects["room-id"].append(row["room_id"])
             dict_objects["room-type"].append(row.get("room_type"))
+            dict_objects["pickupable"].append(row.get("pickupable"))
+            dict_objects["moveable"].append(row.get("moveable"))
+            dict_objects["mass"].append(row.get("mass"))
             dict_objects["obj-color"].append(row["color"])
             self.save_data_by_axis(dict_objects, "obj-pos", row["position"])
             self.save_data_by_axis(dict_objects, "obj-rot", row["rotation"])

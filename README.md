@@ -49,9 +49,14 @@ This sets (edit paths in `configure_variables.sh` if needed):
 `RoomVisitTask` uses `Collector` during navigation. While the agent explores:
 
 1. A pickupable is tracked the first time it has nav-camera mask pixels. Masks render on every agent step.
-2. On episode end (`done` or `max_steps`), logs are saved under `$OBJAVERSE_NAVIGATION_PATH/<timestamp>/` with `images/` and `annotations/`.
+2. When a movable object is close but out of view, the agent glances at it: a fixed number of 45° turns toward the object, then back. Those frames are marked `scripted-glance` in `navigation-*.csv`.
+3. On episode end (`done`, `max_steps` or `timeout`), logs are saved under `$OBJAVERSE_NAVIGATION_PATH/<timestamp>/` with `images/` and `annotations/`.
 
-Placement trials run in that same command, after the agent finishes. The house indexes are the ones already on the eval samples; they are passed in memory. Pass `--floor_radius_m`. The command writes `$OBJAVERSE_NAVIGATION_PATH/<timestamp>/annotations/placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`, next to the other episode files. Each pickupable is tried on floor points within that radius of landmarks in its room and on the 5 largest non-openable receptacles in that room. Landmarks are the 5 largest non-pickupable, non-structural objects whose box bottom is within 0.1 m of the floor, including Objaverse instances. Doors and doorways are excluded. A receptacle place is kept only when that receptacle is a parent of the object; up to 3 spawn points nearest the top of the receptacle are tried. Each CSV row includes `radius_m` and `parent-receptacle`.
+Movable objects are every pickupable and, with `placement.include_moveable`, every `moveable` object up to `placement.moveable_max_mass_kg` with nothing resting on it (chairs, plants, lamps, bins). The glance and the placement trials use this same set.
+
+Placement trials run in that same command, after the agent finishes. The house indexes are the ones already on the eval samples; they are passed in memory. Pass `--floor_radius_m`. The command writes `$OBJAVERSE_NAVIGATION_PATH/<timestamp>/annotations/placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`, next to the other episode files. Each movable object is tried on floor points beside the landmarks in its room, within that radius, and on the 5 largest non-openable receptacles in that room. A non-pickupable object that stands on the floor, such as a chair, gets floor trials only. Landmarks are the 5 largest non-pickupable, non-structural objects whose box bottom is within 0.1 m of the floor, including Objaverse instances. Doors and doorways are excluded. A receptacle place is kept only when that receptacle is a parent of the object; up to 3 spawn points nearest the top of the receptacle are tried. After a successful place the object is teleported back to its exact original pose. Each CSV row includes `obj-kind` (`pickupable` or `moveable`), `radius_m` and `parent-receptacle`. A house that fails does not stop the run: the simulator is restarted and the next house is tried.
+
+Every collection setting (episode timeout, policy-step cap, glance, placement) is in `configs/collection.yaml`. The file used for a run is copied into `episode_meta-*.json` as `collection_config`.
 
 Run it:
 
@@ -94,7 +99,7 @@ Scene tag is `house_<index>` (not `Procedural`). Episode identity is the **folde
 
 **SPOC trajectory vs THOR navigability:** `navigation-*.csv` is the exact agent rollout (actions, success/fail, poses). `nav_graph-*.json` is environment reachability from `GetReachablePositions` (nodes + grid-adjacency edges), snapshotted at episode start and end. Do **not** treat the SPOC path as optimal.
 
-Visibility columns on each navigation object row (`visible-pixels`, `bbox-area`, `min-side`, `occupancy-ratio`, `mark-x`, `mark-y`): see **[docs/VISIBILITY_METRICS.md](docs/VISIBILITY_METRICS.md)**. Agent room is `current-room` / `current-room-type`. Object room is `obj-room` / `obj-room-type` on the same row (and `room-id` / `room-type` in `objects-*.csv`).
+Visibility columns on each navigation object row (`visible-pixels`, `bbox-area`, `min-side`, `occupancy-ratio`, `mark-x`, `mark-y`): see **[docs/VISIBILITY_METRICS.md](docs/VISIBILITY_METRICS.md)**. Agent room is `current-room` / `current-room-type`. Object room is `obj-room` / `obj-room-type` on the same row (and `room-id` / `room-type` in `objects-*.csv`). `objects-*.csv` also has the THOR properties `pickupable`, `moveable` and `mass`.
 
 Summarize one export:
 

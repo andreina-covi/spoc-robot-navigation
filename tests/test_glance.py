@@ -3,7 +3,13 @@ import math
 import pytest
 
 from utils.collection_config import load_collection_config
-from utils.glance import GlancePlanner, GlanceSettings, horizontal_fov_deg, is_hidden_in_closed_receptacle
+from utils.glance import (
+    GlancePlanner,
+    GlanceSettings,
+    glance_candidates,
+    horizontal_fov_deg,
+    is_hidden_in_closed_receptacle,
+)
 
 W, H, VFOV, ROT = 396, 224, 59.0, 45.0
 
@@ -82,3 +88,38 @@ def test_residual_after_turns_is_inside_view(bearing):
     p = planner([])
     n = p.turns_for(bearing)
     assert abs(bearing - n * ROT) < p.half_hfov
+
+
+def thor_obj(oid, **over):
+    base = {
+        "objectId": oid,
+        "objectType": oid.split("|")[0],
+        "pickupable": False,
+        "moveable": False,
+        "mass": 1.0,
+        "receptacleObjectIds": [],
+        "parentReceptacles": [],
+        "position": {"x": 0.0, "y": 0.5, "z": 0.0},
+        "axisAlignedBoundingBox": {
+            "center": {"x": 0.0, "y": 0.5, "z": 0.0},
+            "size": {"x": 0.5, "y": 1.0, "z": 0.5},
+        },
+    }
+    base.update(over)
+    return base
+
+
+def test_glance_candidates_are_the_placement_trial_objects():
+    objects = [
+        thor_obj("Mug|1", pickupable=True),
+        thor_obj("Chair|1", moveable=True, mass=10.0),
+        thor_obj("Sofa|1", moveable=True, mass=104.0),  # too heavy
+        thor_obj("Desk|1", moveable=True, mass=20.0, receptacleObjectIds=["Mug|1"]),  # loaded
+        thor_obj("Fridge|1"),  # neither pickupable nor moveable
+        thor_obj("Drawer|1", openable=True, isOpen=False),
+        thor_obj("Pen|1", pickupable=True, parentReceptacles=["Drawer|1"]),  # hidden
+        thor_obj("Plate|1", pickupable=True, axisAlignedBoundingBox={}),  # no box
+    ]
+    ids = lambda include: [o["objectId"] for o in glance_candidates(objects, include, 30.0)]
+    assert ids(True) == ["Mug|1", "Chair|1"]
+    assert ids(False) == ["Mug|1"]

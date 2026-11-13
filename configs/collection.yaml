@@ -17,6 +17,8 @@ episode:
 glance:
   # Open-loop glance at nearby movable objects so the ID construct gets a clear
   # encode sighting. Turn a fixed number of times, never loop until visible.
+  # The targets are the placement-trial objects: every pickupable and, with
+  # placement.include_moveable, moveable objects up to placement.moveable_max_mass_kg.
   enabled: true
   # Area floor the glance aims for: fraction of the frame the object should cover.
   # Matches cm-benchmark named_min_frame_fraction (1% of 396x224 = 887 px).
@@ -38,10 +40,23 @@ glance:
   min_steps_between: 5
 
 placement:
-  # scripts/placement_trials.py: where each pickupable could be moved (ID construct).
+  # scripts/placement_trials.py: where each movable object could be moved (ID construct).
+  # Also try `moveable` objects that are not pickupable (chairs, plants, lamps, bins).
+  # Pickupables are small: in Round 4 (10 houses) only 22 of 155 placed-and-seen
+  # pickupables ever covered 1% of the frame, so almost none could be asked about.
+  include_moveable: true
+  # Heavier furniture is not moved (THOR mass: Chair 10, ArmChair 28, Bed 30,
+  # Dresser 57, DiningTable 85, Sofa 104). Objaverse assets report 1.0, so
+  # cm-benchmark still decides by size which moved objects it asks about.
+  # An object with anything resting on it is never moved.
+  moveable_max_mass_kg: 30
   top_receptacles: 5  # most salient non-openable receptacles tried per room
   top_landmarks: 5  # floor landmarks per room (also the world_layout landmark list)
   max_receptacle_spawns: 3  # spawn points tried per receptacle
+  max_floor_spawns: 3  # floor points tried per landmark, nearest to its box first
+  # A floor point must be at least the object's half footprint plus this margin
+  # away from the landmark's box, so the object does not start inside the landmark.
+  floor_clearance_margin_m: 0.05
   # Points tried on one receptacle are at least this far apart (xz). Adjacent points
   # (2-4 cm) are all blocked by the same object already standing there.
   min_spawn_separation_m: 0.25
@@ -50,3 +65,6 @@ placement:
   # Without it the object intersects the surface ("Spawn area not clear").
   lift_epsilon_m: 0.01
   physics_settle_steps: 10  # AdvancePhysicsStep calls after a house reload
+  # After a trial the object is teleported back; farther than this from its
+  # original position counts as a failed restore and the house is reloaded.
+  restore_tolerance_m: 0.01

@@ -24,6 +24,19 @@ def room_id_at(room_poly_map, position):
     return get_room_id_from_location(room_poly_map, position, verbose=False)
 
 
+def object_room_id(obj: Dict[str, Any], room_poly_map):
+    """Room that contains the object.
+
+    A ProcTHOR room floor has the room's id as its ``objectId`` and position
+    (0, 0, 0), so its position says nothing about its room. The house-wide
+    ``Floor`` object belongs to no room.
+    """
+    if _is_floor(obj):
+        oid = obj.get("objectId") or obj.get("id")
+        return oid if oid in room_poly_map else None
+    return room_id_at(room_poly_map, obj.get("position"))
+
+
 def receptacle_salience(rec: Dict[str, Any]) -> float:
     """Visual prominence from axis-aligned box volume. Larger is more salient."""
     box = rec.get("axisAlignedBoundingBox") or {}
@@ -257,12 +270,46 @@ def xyz_dict(point) -> Dict[str, float]:
     return {"x": float(point[0]), "y": float(point[1]), "z": float(point[2])}
 
 
-def floor_anchor_points(landmarks, spawns, radius_m: float):
-    """Closest floor spawn within ``radius_m`` of each landmark.
+def footprint_half_extent(obj: Dict[str, Any]) -> float:
+    """Half of the longer horizontal side of the axis-aligned box (0 without a box)."""
+    size = (obj.get("axisAlignedBoundingBox") or {}).get("size")
+    if not isinstance(size, dict):
+        return 0.0
+    return max(abs(float(size.get("x", 0.0))), abs(float(size.get("z", 0.0)))) / 2.0
 
-    ``landmarks`` items have ``landmark_id`` and ``position``.
-    ``spawns`` are xyz dicts. One point per landmark.
+
+def footprint_gap(point: Dict[str, float], landmark: Dict[str, Any]) -> float:
+    """Horizontal distance from ``point`` to the landmark's box footprint (0 inside).
+
+    A landmark without a ``box`` is measured from its ``position``.
     """
+    box = landmark.get("box") or {}
+    center, size = box.get("center"), box.get("size")
+    if isinstance(center, dict) and isinstance(size, dict):
+        dx = abs(point["x"] - float(center["x"])) - abs(float(size["x"])) / 2.0
+        dz = abs(point["z"] - float(center["z"])) - abs(float(size["z"])) / 2.0
+        return float(np.hypot(max(dx, 0.0), max(dz, 0.0)))
+    origin = xyz_dict(landmark["position"])
+    return float(np.hypot(point["x"] - origin["x"], point["z"] - origin["z"]))
+
+
+def floor_anchor_points(
+    landmarks,
+    spawns,
+    radius_m: float,
+    clearance_m: float = 0.0,
+    limit: int = 1,
+    min_separation_m: float = 0.0,
+):
+    """Floor spawns next to each landmark, nearest first.
+
+    ``landmarks`` items have ``landmark_id``, ``position`` and optionally ``box``
+    (the axis-aligned box). ``spawns`` are xyz dicts. A spawn qualifies when its
+    gap to the landmark footprint is between ``clearance_m`` (room for the placed
+    object) and ``radius_m``. Each landmark gives up to ``limit`` points at least
+    ``min_separation_m`` apart, as ``(landmark_id, point)`` pairs.
+    """
+    points = [xyz_dict(pos) for pos in spawns]
     anchors = []
     for landmark in landmarks:
         if not landmark.get("landmark_id") or not landmark.get("position"):
@@ -271,17 +318,49 @@ def floor_anchor_points(landmarks, spawns, radius_m: float):
             obj_type=landmark.get("obj-type"), object_id=landmark.get("landmark_id")
         ):
             continue
-        origin = xyz_dict(landmark["position"])
-        nearest = None
-        nearest_d = None
-        for pos in spawns:
-            point = xyz_dict(pos)
-            distance = float(np.hypot(point["x"] - origin["x"], point["z"] - origin["z"]))
-            if distance > radius_m:
-                continue
-            if nearest_d is None or distance < nearest_d:
-                nearest = point
-                nearest_d = distance
-        if nearest is not None:
-            anchors.append((landmark["landmark_id"], nearest))
+        ranked = []
+        for point in points:
+            gap = footprint_gap(point, landmark)
+            if clearance_m <= gap <= radius_m:
+                ranked.append((gap, point["x"], point["z"], point))
+        ranked.sort(key=lambda item: item[:3])
+        chosen: List[Dict[str, float]] = []
+        for _gap, _x, _z, point in ranked:
+            if all(
+                np.hypot(point["x"] - q["x"], point["z"] - q["z"]) >= min_separation_m
+                for q in chosen
+            ):
+                chosen.append(point)
+                if len(chosen) == limit:
+                    break
+        anchors.extend((landmark["landmark_id"], point) for point in chosen)
     return anchors
+
+
+def stands_on_floor(obj: Dict[str, Any], floor_y: Optional[float]) -> bool:
+    """True when the box bottom is within ``FLOOR_CONTACT_M`` of the floor height."""
+    bottom = aabb_bottom_y(obj)
+    return floor_y is not None and bottom is not None and abs(bottom - floor_y) <= FLOOR_CONTACT_M
+
+
+def is_trial_object(obj: Dict[str, Any], include_moveable: bool, max_mass_kg: float) -> bool:
+    """Objects whose placement is tried: every pickupable, and (when
+    ``include_moveable``) a ``moveable`` object that is light enough and has
+    nothing resting on it, so moving it leaves the rest of the house in place.
+    Doors and structure are never moved.
+    """
+    oid = obj.get("objectId")
+    if not oid:
+        return False
+    if obj.get("pickupable"):
+        return True
+    if not include_moveable or not obj.get("moveable"):
+        return False
+    if is_structural_object(obj_type=obj.get("objectType"), object_id=oid):
+        return False
+    if is_passage_object(obj):
+        return False
+    if obj.get("receptacleObjectIds"):
+        return False
+    mass = obj.get("mass")
+    return mass is not None and float(mass) <= float(max_mass_kg)

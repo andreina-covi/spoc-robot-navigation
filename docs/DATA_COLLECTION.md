@@ -14,7 +14,7 @@ Extend SPOC RoomVisit navigation logging so post-processing / **cm-benchmark** c
 
 | Construct | Need |
 |-----------|------|
-| `invisible_displacement` | Per house, each pickupable is trial-placed on floor points within the given radius of landmarks in its room and on the 5 largest non-openable receptacles in that room. Landmarks are the 5 largest non-pickupable, non-structural objects whose box bottom is within 0.1 m of the floor, including Objaverse instances. Doors are excluded. One floor spawn per landmark; up to 3 receptacle spawns nearest the top face. A receptacle place is kept only when that receptacle is in `parentReceptacles`. Restored only when the place succeeds. A failed restore reloads the house before the next pickupable. Rows land in the episode `annotations/` folder as `placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv` and include `radius_m` and `parent-receptacle`. |
+| `invisible_displacement` | Per house, each movable object is trial-placed on floor points next to landmarks in its room and on the 5 largest non-openable receptacles in that room. Movable objects are every pickupable plus, with `placement.include_moveable`, every `moveable` object up to `moveable_max_mass_kg` with nothing resting on it (chairs, plants, lamps, bins). Landmarks are the 5 largest non-pickupable, non-structural objects whose box bottom is within 0.1 m of the floor, including Objaverse instances. Doors are excluded. Up to 3 floor spawns per landmark and up to 3 receptacle spawns nearest the top face. A receptacle place is kept only when that receptacle is in `parentReceptacles`. After a successful place the object is teleported back to its exact pose. A failed restore reloads the house before the next object. Rows land in the episode `annotations/` folder as `placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv` and include `obj-kind`, `radius_m` and `parent-receptacle`. |
 | `survey_knowledge` | Multi-room trajectory + layout connectivity / door state |
 
 Facing / intrinsic “front of object” is **out of scope** for this pass.
@@ -37,7 +37,10 @@ online_eval (RoomVisit)
 
 | Module | Role |
 |--------|------|
-| `tasks/room_visit_task.py` | World layout, door sampling, pickupable tracking |
+| `tasks/room_visit_task.py` | World layout, door sampling, pickupable tracking, glance |
+| `utils/glance.py` | Glance targets and the per-step choice of one target |
+| `utils/placement_anchors.py` | Movable-object rule (`is_trial_object`), landmarks, receptacles, floor points, object rooms |
+| `configs/collection.yaml` | Every collection setting: episode limits, glance, placement |
 | `scripts/placement_trials.py` | Placement trials for the houses just navigated. Called at the end of the RoomVisit command. |
 | `collector.py` | Visibility tracking, CSV/JSON writers, episode folder under `OBJAVERSE_NAVIGATION_PATH` |
 | `environment/spoc_objects.py` | `SPOCObject.get()` fixed so `.get("pickupable", False)` works |
@@ -129,7 +132,7 @@ python scripts/summarize_episode_export.py --run_dir "$OBJAVERSE_NAVIGATION_PATH
 | Output | Objects included |
 |--------|------------------|
 | `navigation-*.csv` | Non-structural FOV objects with `visible-pixels > 0`, including numeric ids such as `6|5`. Each step has `ag-action`, `action_success` (`lastActionSuccess`), and the agent pose after that action. |
-| `objects-*.csv` | Catalog of those FOV objects. `obj-id` is unchanged. `obj-type` and `obj-synset` are filled at export (`describe_object`). Also `assetId`, `room-id`, `room-type` (the room that contains the object, not the agent), and the axis-aligned box `aabb-min-*` / `aabb-max-*`. |
+| `objects-*.csv` | Catalog of those FOV objects. `obj-id` is unchanged. `obj-type` and `obj-synset` are filled at export (`describe_object`). Also `assetId`, `room-id`, `room-type` (the room that contains the object, not the agent), the THOR properties `pickupable`, `moveable`, `mass`, and the axis-aligned box `aabb-min-*` / `aabb-max-*`. |
 | `object_state-*.csv` | **Pickupable** objects tracked after nav mask pixels at least once |
 | `current-room` (in `navigation-*.csv`) | **Agent–room** membership (do **not** treat Floor/Wall as the room object) |
 | `obj-room`, `obj-room-type` (in `navigation-*.csv`) | Room id and room type of the **object**, from its position |
@@ -181,14 +184,14 @@ not in `navigation` for that step. Hidden pickupables appear only in `object_sta
 Tracking starts when a **pickupable** first has mask pixels in the agent camera.
 HousePlant / Fridge / counters / windows stay in `navigation` only.
 
-**`placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`** is written into that episode's `annotations/` folder by `scripts/placement_trials.py` after navigation. `anchor-id` is the receptacle id or the landmark id. `anchor-kind` is `receptacle` or `floor`. `pos-*` is the resolved pose when `success` is true. A successful place is restored before the next anchor. Episodes collected before this change may still contain `displacement_events`, `displacement_candidates`, and `displacement_debug`; those files are not written now.
+**`placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`** is written into that episode's `annotations/` folder by `scripts/placement_trials.py` after navigation. `obj-kind` is `pickupable` or `moveable` (a non-pickupable object such as a chair). `anchor-id` is the receptacle id or the landmark id. `anchor-kind` is `receptacle` or `floor`. `pos-*` is the resolved pose when `success` is true. A successful place is restored before the next anchor. Episodes collected before this change may still contain `displacement_events`, `displacement_candidates`, and `displacement_debug`; those files are not written now.
 
 **`navigation-*.csv`:** one row group per step with `ag-action`, `action_success` (`lastActionSuccess`), and `ag-pos-*` / `ag-rot-*` after the action. `current-room` and `current-room-type` are the agent's room. `obj-room` and `obj-room-type` are the room that contains that object. Object rows are added only when `visible-pixels > 0`. Numeric ids are included. Hidden tracked pickupables stay in `object_state`.
 `scripted-glance` is true on frames inserted by the open-loop glance (not chosen by the policy), and `glance-obj-id` names the object looked at. Consumers that replay the agent's route (cm-benchmark class 4) must skip those frames.
 
 **`episode_meta-*.json`:** `collection_config` is the `configs/collection.yaml` used for the run. `glances` lists each glance (`object_id`, `policy_step`, `first_timestep`, `turns`, `bearing_deg`, `distance_m`, `expected_px`). `save_reason` is `done`, `max_steps` or `timeout`, and `truncated` is true on a timeout.
 
-**`objects-*.csv`:** one row per unique exported object. `obj-id` is the THOR id, including values like `6|5`. `obj-type` and `obj-synset` come from `describe_object`. `aabb-min-*` / `aabb-max-*` are the 3D axis-aligned corners. `room-id` and `room-type` are the room that contains the object.
+**`objects-*.csv`:** one row per unique exported object. `obj-id` is the THOR id, including values like `6|5`. `obj-type` and `obj-synset` come from `describe_object`. `aabb-min-*` / `aabb-max-*` are the 3D axis-aligned corners. `room-id` and `room-type` are the room that contains the object. `pickupable`, `moveable` and `mass` are the THOR metadata values. Objaverse assets report mass 1.0, so use the box size to judge how large they are.
 
 **`world_layout-*.json`:** each region has `polygon` (floor outline) and `area` (square meters on xz). `doors` and `passage_state` record each door once at the start, including whether it is open.
 
@@ -202,13 +205,16 @@ The RoomVisit command already knows the house indexes (`house_id` on the eval sa
 
 The CSV is written next to the other episode files: `$OBJAVERSE_NAVIGATION_PATH/<timestamp>/annotations/placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`. The radius is `--floor_radius_m` on the RoomVisit command (required; there is no default). Running `scripts/placement_trials.py` alone still accepts `--output` (default `$OBJAVERSE_NAVIGATION_PATH/placement_trials`) for a manual directory.
 
-For each pickupable:
+The objects tried are every pickupable and, when `placement.include_moveable` is true, every `moveable` object with mass up to `moveable_max_mass_kg` and nothing resting on it. Pickupables alone are too small for the ID construct: in Round 4 (10 houses) only 22 of 155 placed-and-seen pickupables ever covered 1% of the frame. Doors and structure are never moved. An object that carries other objects is skipped, because moving it would let them fall.
 
-1. Floor: the closest floor spawn within that radius of each landmark in its room. Landmarks are the 5 largest non-pickupable, non-structural objects whose box bottom is within 0.1 m of the floor height, including Objaverse instances. Doors and doorways are excluded. A room with no floor uses the lowest floor height in the house. `--top_landmarks` changes that count. One point per landmark. Object poses are read after 10 physics steps.
-2. Receptacles: the 5 largest non-openable receptacles in that room (`receptacle_salience` is the axis-aligned box volume). Floor, wall, ceiling, room, and openable receptacles are excluded.
-3. Up to `max_receptacle_spawns` spawn coordinates per receptacle, closest to the center of its top face and at least `min_spawn_separation_m` apart (adjacent points are all blocked by the same object). Spawn lists are cached per receptacle. One floor spawn per landmark.
-4. `PlaceObjectAtPoint` with `forceKinematic`. It places the object's position (pivot), not its bottom, so every target is raised by the object's pivot-to-bottom height plus `lift_epsilon_m`; without this the object intersects the surface ("Spawn area not clear"). Settings are under `placement:` in `configs/collection.yaml`. A receptacle row is `success` only when that receptacle is in `parentReceptacles` after the place. `parent-receptacle` records those ids. The original pose is restored only when the place action succeeds. If the restore fails, the house is reloaded before the next pickupable.
-5. Columns: `obj-id`, `anchor-id`, `anchor-kind` (`receptacle` or `floor`), `pos-*`, `success`, `radius_m`, `parent-receptacle`. The split and radius are also in the file name.
+For each of those objects:
+
+1. Floor: up to `max_floor_spawns` floor spawns next to each landmark in its room, nearest to the landmark's box first and at least `min_spawn_separation_m` apart. A spawn qualifies when its gap to the landmark's box footprint is at least the object's half footprint plus `floor_clearance_margin_m` and at most the radius, so the object lands beside the landmark and not inside it. The first point where the place succeeds is kept. Landmarks are the 5 largest non-pickupable, non-structural objects whose box bottom is within 0.1 m of the floor height, including Objaverse instances. Doors and doorways are excluded, and so is the object itself. A room with no floor uses the lowest floor height in the house. `--top_landmarks` changes that count. Object poses are read after 10 physics steps.
+2. Receptacles: the 5 largest non-openable receptacles in that room (`receptacle_salience` is the axis-aligned box volume). Floor, wall, ceiling, room, and openable receptacles are excluded. A non-pickupable object that stands on the floor (a chair, a floor lamp) gets floor trials only.
+3. Up to `max_receptacle_spawns` spawn coordinates per receptacle, closest to the center of its top face and at least `min_spawn_separation_m` apart (adjacent points are all blocked by the same object). Spawn lists are cached per receptacle.
+4. `PlaceObjectAtPoint` with `forceKinematic`. It places the object's position (pivot), not its bottom, so every target is raised by the object's pivot-to-bottom height plus `lift_epsilon_m`; without this the object intersects the surface ("Spawn area not clear"). Settings are under `placement:` in `configs/collection.yaml`. A receptacle row is `success` only when that receptacle is in `parentReceptacles` after the place. `parent-receptacle` records those ids.
+5. Restore: `TeleportObject` with `forceAction` puts the object back at its exact original pose. `PlaceObjectAtPoint` cannot do this when a neighbour touches the original pose. If the object is farther than `restore_tolerance_m` from its origin afterwards, the house is reloaded before the next object. If a house raises an error, the controller is restarted and the run goes on with the next house; that house gets no placement file.
+6. Columns: `obj-id`, `obj-kind` (`pickupable` or `moveable`), `anchor-id`, `anchor-kind` (`receptacle` or `floor`), `pos-*`, `success`, `radius_m`, `parent-receptacle`. The split and radius are also in the file name.
 
 ---
 
@@ -235,8 +241,16 @@ Mitigations already in code:
 - **Incremental CSV flush** every `flush_every` (default 50) steps for navigation /
   doors / object_state so RAM stays bounded.
 - **Open-loop glance** (`utils/glance.py`, settings in `configs/collection.yaml`):
-  pickupable positions and sizes are read once at episode start. Each step runs one
+  the targets are the placement-trial objects (`glance_candidates`): every pickupable
+  and, with `placement.include_moveable`, every `moveable` object up to
+  `moveable_max_mass_kg` with nothing resting on it. An object inside a closed
+  receptacle is not a target. In the ten Round 4 walks, where the glance looked at
+  pickupables only, 36 of 75 placed `moveable` objects never came into view.
+  Positions and sizes are read once at episode start. Each step runs one
   numpy distance/bearing computation, with no rendering and no simulator call.
+  A target must be in the agent's room, out of view, within `max_distance_m`, and
+  large enough to cover `area_margin` × `min_frame_fraction` of the frame from there.
+  When several qualify, the one with the largest expected area is chosen.
   A glance turns a fixed number of 45° steps toward one object (at most `max_turns`),
   then turns back. It never loops until the object is visible; the 1% frame check
   happens offline in cm-benchmark. Limits: one glance per object, `max_per_episode`,
@@ -260,8 +274,10 @@ Mitigations already in code:
 |-------|-----|
 | `SPOCObject.get("pickupable", False)` always `False` | Implement `SPOCObject.get()` in `environment/spoc_objects.py` (builtin `dict.get` ignores `__getitem__`) |
 | `PlaceObjectAtPoint(..., forceAction=True)` ValueError | Use `forceKinematic=True` |
-| Objects left in the trial pose | `scripts/placement_trials.py` restores only after a successful place. A failed restore reloads the house before the next pickupable. |
+| Objects left in the trial pose | `scripts/placement_trials.py` restores only after a successful place. A failed restore reloads the house before the next object. |
 | Scene name always `Procedural` | Use `house_<index>` |
+| Room floors got the wrong room or none. A ProcTHOR room floor has the room id as its `objectId` and position (0, 0, 0). Houses whose origin is outside every room exported no landmarks and no floor placements (3 of 10 in Round 4); the others had floor placements in one room only. | `object_room_id` in `utils/placement_anchors.py` reads a floor's room from its id. Only the house-wide `Floor` returns spawn points, so `floor_spawns_by_room` assigns each point to the room whose polygon contains it |
+| Restoring a trial object with `PlaceObjectAtPoint` failed when a neighbour touched its original pose | `restore_object` uses `TeleportObject` with `forceAction` |
 
 ---
 
@@ -308,7 +324,7 @@ Do **not** expect egocentric direction columns at collection time; compute those
 
 ### Validator pattern
 
-For a house, each pickupable has up to five receptacle rows and one floor row per landmark that has a spawn within the requested radius. Floor `success` is true when `PlaceObjectAtPoint` succeeded. Receptacle `success` also requires that receptacle id in `parentReceptacles` (up to 3 nearest top-face spawns are tried). The original pose is restored only when the place action succeeds. A failed restore reloads the house before the next pickupable.
+For a house, each movable object (`obj-kind` `pickupable` or `moveable`) has one floor row per landmark that has a qualifying spawn within the requested radius. It also has up to five receptacle rows, except a non-pickupable object that stands on the floor, which has floor rows only. Floor `success` is true when `PlaceObjectAtPoint` succeeded at one of up to `max_floor_spawns` points. A floor row means the object lies on the floor beside `anchor-id`, not on it. Receptacle `success` also requires that receptacle id in `parentReceptacles` (up to 3 nearest top-face spawns are tried). The original pose is restored only when the place action succeeds. A failed restore reloads the house before the next object.
 
 ### Example item types
 

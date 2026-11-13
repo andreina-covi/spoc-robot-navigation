@@ -1,20 +1,25 @@
 #!/usr/bin/env python3
-"""Trial-place every pickupable in a house, without agent navigation.
+"""Trial-place every movable object in a house, without agent navigation.
 
-Loads one house into AI2-THOR. For each pickupable, places it once on:
+Loads one house into AI2-THOR. The objects tried are every pickupable and,
+with ``placement.include_moveable``, every ``moveable`` object that is light
+enough and has nothing resting on it (chairs, plants, lamps, bins). Each one
+is placed on:
 
-- the closest floor spawn within the given radius of each landmark in that room
-- the 5 most salient non-openable receptacles in that room
+- a floor spawn next to each landmark in that room: the spawn nearest to the
+  landmark's box that leaves room for the object, within the given radius
+- the 5 most salient non-openable receptacles in that room (not for a
+  non-pickupable object that stands on the floor)
 
 Landmarks are non-pickupable, non-structural objects standing on the floor.
 Doors and doorways are excluded. A receptacle place is kept only when that
 receptacle is in the object's parentReceptacles. Up to 3 spawn points are
-tried, the ones closest to the receptacle's top face that are at least
-``min_spawn_separation_m`` apart. Each target is raised by the object's
-pivot-to-bottom height, because PlaceObjectAtPoint places the object's position,
-not its bottom. Settings live in ``configs/collection.yaml`` (placement). The object is restored
-only when the place action succeeds. A failed restore reloads the house
-before the next pickupable. The RoomVisit command writes
+tried per anchor, at least ``min_spawn_separation_m`` apart. Each target is
+raised by the object's pivot-to-bottom height, because PlaceObjectAtPoint
+places the object's position, not its bottom. Settings live in
+``configs/collection.yaml`` (placement). After a successful place the object
+is teleported back to its exact original pose. A failed restore reloads the
+house before the next object. The RoomVisit command writes
 ``placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`` into that
 episode's ``annotations/`` folder.
 
@@ -50,12 +55,17 @@ from utils.placement_anchors import (  # noqa: E402
     TOP_RECEPTACLES,
     aabb_top_center,
     floor_anchor_points,
+    floor_height_by_room,
+    footprint_half_extent,
+    is_trial_object,
     lifted,
+    object_room_id,
     place_lift,
     room_id_at,
     salient_landmarks,
     salient_receptacles,
     spread_points,
+    stands_on_floor,
     xyz_dict,
 )
 
@@ -63,9 +73,15 @@ _PLACEMENT = load_collection_config()["placement"]
 MAX_RECEPTACLE_SPAWNS = int(_PLACEMENT["max_receptacle_spawns"])
 MIN_SPAWN_SEPARATION_M = float(_PLACEMENT["min_spawn_separation_m"])
 LIFT_EPSILON_M = float(_PLACEMENT["lift_epsilon_m"])
+MAX_FLOOR_SPAWNS = int(_PLACEMENT["max_floor_spawns"])
+FLOOR_CLEARANCE_MARGIN_M = float(_PLACEMENT["floor_clearance_margin_m"])
+INCLUDE_MOVEABLE = bool(_PLACEMENT["include_moveable"])
+MOVEABLE_MAX_MASS_KG = float(_PLACEMENT["moveable_max_mass_kg"])
+RESTORE_TOLERANCE_M = float(_PLACEMENT["restore_tolerance_m"])
 
 CSV_FIELDS = (
     "obj-id",
+    "obj-kind",
     "anchor-id",
     "anchor-kind",
     "pos-x",
@@ -151,6 +167,7 @@ def landmark_points(objects, room_id, limit=TOP_LANDMARKS, passage_ids=None) -> 
                 "landmark_id": oid,
                 "obj-type": obj.get("objectType"),
                 "position": position,
+                "box": obj.get("axisAlignedBoundingBox"),
             }
         )
     return points
@@ -194,6 +211,34 @@ def place_at(controller: StretchController, object_id: str, position, rotation=N
     return bool(event.metadata.get("lastActionSuccess", False))
 
 
+def restore_object(controller: StretchController, object_id: str, origin, origin_rot) -> bool:
+    """Teleport the object back to its original pose and check that it is there.
+
+    ``TeleportObject`` with ``forceAction`` skips the collision check, so the
+    exact pose is restored even when a neighbour touches it. Placing it back
+    with ``PlaceObjectAtPoint`` fails in that case ("Spawn area not clear").
+    """
+    kwargs = dict(
+        action="TeleportObject",
+        objectId=object_id,
+        position=xyz_dict(origin),
+        forceAction=True,
+        renderImageSynthesis=False,
+    )
+    if origin_rot is not None:
+        kwargs["rotation"] = xyz_dict(origin_rot)
+    try:
+        event = controller.step(**kwargs)
+        if not event.metadata.get("lastActionSuccess", False):
+            return False
+        now = xyz_dict(controller.get_object(object_id)["position"])
+    except Exception:
+        return False
+    target = xyz_dict(origin)
+    offset = sum((now[axis] - target[axis]) ** 2 for axis in "xyz") ** 0.5
+    return offset <= RESTORE_TOLERANCE_M
+
+
 def parent_receptacle_ids(controller: StretchController, object_id: str) -> List[str]:
     try:
         obj = controller.get_object(object_id, include_receptacle_info=True)
@@ -221,29 +266,30 @@ def resolved_position(controller: StretchController, object_id: str, fallback):
 
 
 def trial_anchor(
-    controller, object_id, anchor_id, anchor_kind, target, origin, origin_rot, radius_m, lift=0.0
+    controller, object_id, anchor_id, anchor_kind, targets, origin, origin_rot, radius_m, lift=0.0
 ):
-    """One place. Restore only when that place succeeds.
+    """Try ``targets`` in order until one place succeeds, then restore.
 
-    ``target`` is a surface point; it is raised by ``lift`` (see ``place_lift``).
+    Each target is a surface point; it is raised by ``lift`` (see ``place_lift``).
     Returns the CSV row and whether the object is back at its original pose.
     """
-    if target is None:
-        return row(object_id, anchor_id, anchor_kind, None, False, radius_m, ""), True
-    target = lifted(target, lift)
-    ok = place_at(controller, object_id, target)
-    if not ok:
-        return row(object_id, anchor_id, anchor_kind, None, False, radius_m, ""), True
-    pose = resolved_position(controller, object_id, target)
-    restored = place_at(controller, object_id, origin, origin_rot)
-    if not restored:
-        print(f"[placement] restore failed obj={object_id} anchor={anchor_id}")
-    return row(object_id, anchor_id, anchor_kind, pose, True, radius_m, ""), restored
+    for target in targets or []:
+        target = lifted(target, lift)
+        if not place_at(controller, object_id, target):
+            continue
+        pose = resolved_position(controller, object_id, target)
+        restored = restore_object(controller, object_id, origin, origin_rot)
+        if not restored:
+            print(f"[placement] restore failed obj={object_id} anchor={anchor_id}")
+        return row(object_id, anchor_id, anchor_kind, pose, True, radius_m, ""), restored
+    return row(object_id, anchor_id, anchor_kind, None, False, radius_m, ""), True
 
 
 def row(object_id, anchor_id, anchor_kind, pose, success, radius_m, parent_receptacle="") -> dict:
+    """One CSV row. ``obj-kind`` is filled once per object in ``trials_for_house``."""
     return {
         "obj-id": object_id,
+        "obj-kind": "",
         "anchor-id": anchor_id,
         "anchor-kind": anchor_kind,
         "pos-x": None if pose is None else pose[0],
@@ -277,7 +323,7 @@ def trial_receptacle(
         last_parents = format_parents(parents)
         accepted = rid in parents
         pose = resolved_position(controller, object_id, target) if accepted else None
-        restored = place_at(controller, object_id, origin, origin_rot)
+        restored = restore_object(controller, object_id, origin, origin_rot)
         if not restored:
             print(f"[placement] restore failed obj={object_id} anchor={rid}")
             return (
@@ -300,71 +346,112 @@ def scene_objects(controller: StretchController) -> List[dict]:
     with controller.include_object_metadata_context():
         objects = [dict(obj) for obj in controller.controller.last_event.metadata["objects"]]
     for obj in objects:
-        obj["room_id"] = room_id_at(controller.room_poly_map, obj.get("position"))
+        obj["room_id"] = object_room_id(obj, controller.room_poly_map)
     return objects
 
 
-def floor_ids_in_room(objects, room_id) -> List[str]:
+def floor_ids(objects) -> List[str]:
+    """Every floor object: the room floors and the house-wide ``Floor``."""
     ids = []
     for obj in objects:
         oid = obj.get("objectId")
         is_floor = obj.get("objectType") == "Floor" or (
             oid is not None and str(oid).startswith("Floor|")
         )
-        if is_floor and obj.get("room_id") == room_id and oid:
+        if is_floor and oid:
             ids.append(oid)
     return ids
 
 
-def floor_spawns(cache: SpawnCache, objects, room_id) -> list:
-    spawns = []
-    for floor_id in floor_ids_in_room(objects, room_id):
-        spawns.extend(cache.coordinates(floor_id))
-    return spawns
+def floor_spawns_by_room(cache: SpawnCache, objects, room_poly_map) -> Dict[Any, list]:
+    """Floor spawn points grouped by the room whose polygon contains them.
+
+    In ProcTHOR houses only the house-wide ``Floor`` returns spawn points, and
+    they cover every room, so each point is assigned by its own position.
+    """
+    grouped: Dict[Any, list] = {}
+    for floor_id in floor_ids(objects):
+        for point in cache.coordinates(floor_id):
+            room_id = room_id_at(room_poly_map, point)
+            if room_id is not None:
+                grouped.setdefault(room_id, []).append(point)
+    return grouped
+
+
+def floor_targets(landmarks, spawns, radius_m, clearance_m) -> Dict[str, list]:
+    """Floor points to try per landmark id, nearest to the landmark first."""
+    grouped: Dict[str, list] = {}
+    for anchor_id, point in floor_anchor_points(
+        landmarks, spawns, radius_m, clearance_m, MAX_FLOOR_SPAWNS, MIN_SPAWN_SEPARATION_M
+    ):
+        grouped.setdefault(anchor_id, []).append(point)
+    return grouped
 
 
 def trials_for_house(controller, house, radius_m, top_n, top_landmarks=TOP_LANDMARKS) -> List[dict]:
     objects = scene_objects(controller)
     passages = passage_ids_from_house(house)
     cache = SpawnCache(controller)
-    floor_by_room: Dict[Any, list] = {}
+    floor_by_room = floor_spawns_by_room(cache, objects, controller.room_poly_map)
+    floor_heights = floor_height_by_room(objects)
+    lowest_floor = min(floor_heights.values()) if floor_heights else None
     rows = []
-    pickupables = [obj for obj in objects if obj.get("pickupable") and obj.get("objectId")]
-    for index, obj in enumerate(pickupables, start=1):
+    candidates = [
+        obj
+        for obj in objects
+        if is_trial_object(obj, INCLUDE_MOVEABLE, MOVEABLE_MAX_MASS_KG)
+        and obj["objectId"] not in passages
+    ]
+    for index, obj in enumerate(candidates, start=1):
         oid = obj["objectId"]
         room_id = obj.get("room_id")
-        print(f"[placement] {index}/{len(pickupables)} {oid} room={room_id}")
+        kind = "pickupable" if obj.get("pickupable") else "moveable"
+        print(f"[placement] {index}/{len(candidates)} {oid} ({kind}) room={room_id}")
         if not room_id:
             continue
         origin = obj.get("position")
         origin_rot = obj.get("rotation")
         lift = place_lift(obj, LIFT_EPSILON_M)
-        if room_id not in floor_by_room:
-            floor_by_room[room_id] = floor_spawns(cache, objects, room_id)
+        landmarks = [
+            point
+            for point in landmark_points(objects, room_id, top_landmarks, passages)
+            if point["landmark_id"] != oid
+        ]
+        clearance = footprint_half_extent(obj) + FLOOR_CLEARANCE_MARGIN_M
+        targets = floor_targets(landmarks, floor_by_room.get(room_id, []), radius_m, clearance)
+        first_row = len(rows)
         restore_ok = True
-        for anchor_id, point in floor_anchor_points(
-            landmark_points(objects, room_id, top_landmarks, passages), floor_by_room[room_id], radius_m
-        ):
+        for landmark in landmarks:
+            anchor_id = landmark["landmark_id"]
+            if anchor_id not in targets:
+                continue
             result, restore_ok = trial_anchor(
-                controller, oid, anchor_id, "floor", point, origin, origin_rot, radius_m, lift
+                controller, oid, anchor_id, "floor", targets[anchor_id], origin, origin_rot,
+                radius_m, lift,
             )
             rows.append(result)
             if not restore_ok:
                 break
-        if restore_ok:
+        # A chair or a floor lamp is moved across the floor, not onto a table.
+        on_floor = stands_on_floor(obj, floor_heights.get(room_id, lowest_floor))
+        if restore_ok and (kind == "pickupable" or not on_floor):
             for rec in salient_receptacles(objects, room_id, limit=top_n):
+                if rec.get("objectId") == oid:
+                    continue
                 result, restore_ok = trial_receptacle(
                     controller, oid, rec, origin, origin_rot, radius_m, cache, lift
                 )
                 rows.append(result)
                 if not restore_ok:
                     break
+        for result in rows[first_row:]:
+            result["obj-kind"] = kind
         if not restore_ok:
             print(f"[placement] resetting house before the next object after {oid}")
             reset_house(controller, house)
             objects = scene_objects(controller)
             cache = SpawnCache(controller)
-            floor_by_room = {}
+            floor_by_room = floor_spawns_by_room(cache, objects, controller.room_poly_map)
     return rows
 
 
@@ -400,9 +487,19 @@ def run(
     try:
         for index, house in houses:
             name = house_name(index)
-            print(f"[placement] loading {name}")
-            reset_house(controller, house)
-            rows = trials_for_house(controller, house, radius_m, top_n, top_landmarks)
+            print(f"[placement] loading {name}", flush=True)
+            try:
+                reset_house(controller, house)
+                rows = trials_for_house(controller, house, radius_m, top_n, top_landmarks)
+            except Exception as exc:
+                # One bad house must not end a run of hundreds: restart and go on.
+                print(f"[placement] {name} failed ({exc!r}); restarting the controller", flush=True)
+                try:
+                    controller.stop()
+                except Exception:
+                    pass
+                controller = open_controller()
+                continue
             destinations = _destinations(index, output_dir, output_dirs)
             ok = sum(1 for item in rows if item["success"])
             for dest in destinations:

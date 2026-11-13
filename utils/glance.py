@@ -1,7 +1,10 @@
 """Open-loop glance at nearby movable objects during RoomVisit collection.
 
-Object positions and sizes are read once at episode start (pickupables do not move
-during RoomVisit). Each step costs one vectorised distance/bearing computation:
+The targets are the objects the placement trials move (``is_trial_object``):
+every pickupable and, with ``placement.include_moveable``, light ``moveable``
+objects such as chairs, plants and lamps. Object positions and sizes are read
+once at episode start (nothing moves during RoomVisit). Each step costs one
+vectorised distance/bearing computation:
 no rendering, no extra simulator calls. A glance is a fixed number of 45° turns
 computed once; nothing loops until the object is visible.
 """
@@ -10,6 +13,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Set
 
 import numpy as np
+
+from utils.placement_anchors import is_trial_object
 
 
 @dataclass(frozen=True)
@@ -56,6 +61,30 @@ def is_hidden_in_closed_receptacle(obj: Dict[str, Any], by_id: Dict[str, Dict[st
         if parent.get("openable", False) and not parent.get("isOpen", False):
             return True
     return False
+
+
+def glance_candidates(
+    objects: Iterable[Dict[str, Any]], include_moveable: bool, max_mass_kg: float
+) -> List[Dict[str, Any]]:
+    """THOR objects worth a glance: the placement-trial objects that can be seen.
+
+    Same set as ``scripts/placement_trials.py`` moves, so every object with
+    placement candidates can also get a clear sighting. An object inside a closed
+    receptacle or without a bounding box is left out.
+    """
+    objects = list(objects)
+    by_id = {o["objectId"]: o for o in objects if o.get("objectId")}
+    kept = []
+    for o in objects:
+        if not is_trial_object(o, include_moveable, max_mass_kg):
+            continue
+        if is_hidden_in_closed_receptacle(o, by_id):
+            continue
+        box = o.get("axisAlignedBoundingBox") or {}
+        if not box.get("size") or not (box.get("center") or o.get("position")):
+            continue
+        kept.append(o)
+    return kept
 
 
 class GlancePlanner:

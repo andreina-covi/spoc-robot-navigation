@@ -25,13 +25,13 @@ from utils.glance import (
     GlancePlanner,
     GlanceSettings,
     GlanceTarget,
-    is_hidden_in_closed_receptacle,
+    glance_candidates,
 )
 from utils.nav_graph_export import (
     build_nav_graph_from_reachable_positions,
     reachability_grid_size,
 )
-from utils.placement_anchors import salient_landmarks
+from utils.placement_anchors import object_room_id, salient_landmarks
 from training.online.reward.reward_shaper import RoomVisitRewardShaper
 from collector import Collector
 from online_evaluation.max_episode_configs import MAX_EPISODE_LEN_PER_TASK
@@ -205,7 +205,7 @@ class RoomVisitTask(AbstractSPOCTask):
                 dict(obj) for obj in self.controller.controller.last_event.metadata["objects"]
             ]
         for obj in raw_objects:
-            obj["room_id"] = room_id_at(self.room_poly_map, obj.get("position"))
+            obj["room_id"] = object_room_id(obj, self.room_poly_map)
         landmarks = []
         passage_ids = {passage["obj-id"] for passage in passages if passage.get("obj-id")}
         for obj in salient_landmarks(raw_objects, passage_ids=passage_ids):
@@ -487,21 +487,25 @@ class RoomVisitTask(AbstractSPOCTask):
         return s.max_per_episode * s.max_turns * (2 if s.rotate_back else 1)
 
     def _build_glance_planner(self) -> GlancePlanner:
-        """Read pickupable positions and sizes once (they do not move in RoomVisit)."""
+        """Read the movable objects' positions and sizes once (nothing moves in RoomVisit).
+
+        The targets are the placement-trial objects: pickupables and, with
+        ``placement.include_moveable``, light ``moveable`` objects.
+        """
         with self.controller.include_object_metadata_context():
             all_objs = [
                 dict(o) for o in self.controller.controller.last_event.metadata["objects"]
             ]
-        by_id = {o["objectId"]: o for o in all_objs}
+        placement_cfg = self._collection_cfg["placement"]
         objects = []
-        for o in all_objs:
-            if not o.get("pickupable", False) or is_hidden_in_closed_receptacle(o, by_id):
-                continue
-            box = o.get("axisAlignedBoundingBox") or {}
-            size = box.get("size") or {}
+        for o in glance_candidates(
+            all_objs,
+            bool(placement_cfg["include_moveable"]),
+            float(placement_cfg["moveable_max_mass_kg"]),
+        ):
+            box = o["axisAlignedBoundingBox"]
+            size = box["size"]
             center = box.get("center") or o.get("position")
-            if not size or not center:
-                continue
             objects.append(
                 {
                     "id": o["objectId"],

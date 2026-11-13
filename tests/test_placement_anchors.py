@@ -1,6 +1,8 @@
 from utils.placement_anchors import (
     floor_anchor_points,
+    is_trial_object,
     nearest_points,
+    object_room_id,
     receptacle_salience,
     salient_landmarks,
     salient_receptacles,
@@ -170,3 +172,79 @@ def test_place_lift_is_pivot_to_bottom_plus_gap():
     lift = place_lift(bread, 0.01)
     assert abs(lift - (0.99 - 0.94 + 0.01)) < 1e-9
     assert abs(lifted({"x": 1, "y": 0.94, "z": 2}, lift)["y"] - 1.0) < 1e-9
+
+
+def test_room_floor_takes_its_room_from_its_id():
+    """ProcTHOR room floors sit at (0, 0, 0); their objectId is the room id."""
+    from shapely.geometry import Polygon
+
+    rooms = {"room|2": Polygon([(5, 5), (5, 9), (9, 9), (9, 5)])}
+    origin = {"x": 0.0, "y": 0.0, "z": 0.0}
+    assert object_room_id({"objectId": "room|2", "objectType": "Floor", "position": origin}, rooms) == "room|2"
+    assert object_room_id({"objectId": "Floor", "objectType": "Floor", "position": origin}, rooms) is None
+    chair = {"objectId": "Chair|1", "objectType": "Chair", "position": {"x": 6, "y": 0, "z": 6}}
+    assert object_room_id(chair, rooms) == "room|2"
+
+
+def _landmark_with_box():
+    return {
+        "landmark_id": "Sofa|1",
+        "position": {"x": 0, "y": 0, "z": 0},
+        "box": {"center": {"x": 0, "y": 0.5, "z": 0}, "size": {"x": 2.0, "y": 1.0, "z": 1.0}},
+    }
+
+
+def test_floor_anchor_leaves_room_for_the_object():
+    spawns = [{"x": x, "y": 0.0, "z": 0.0} for x in (0.5, 1.1, 1.3, 1.5, 1.9, 2.6)]
+    # The sofa box ends at x = 1.0; a chair needs 0.35 m from it.
+    anchors = floor_anchor_points([_landmark_with_box()], spawns, radius_m=1.2, clearance_m=0.35)
+    assert [point["x"] for _id, point in anchors] == [1.5]
+
+
+def test_floor_anchor_gives_separated_points_nearest_first():
+    spawns = [{"x": x, "y": 0.0, "z": 0.0} for x in (1.1, 1.2, 1.4, 1.9, 2.6)]
+    anchors = floor_anchor_points(
+        [_landmark_with_box()], spawns, radius_m=1.2, limit=3, min_separation_m=0.25
+    )
+    assert [point["x"] for _id, point in anchors] == [1.1, 1.4, 1.9]
+
+
+def test_trial_objects_are_pickupables_and_light_empty_moveables():
+    def obj(**kwargs):
+        return {"objectId": "Chair|1", "objectType": "Chair", **kwargs}
+
+    assert is_trial_object(obj(pickupable=True), False, 30)
+    assert is_trial_object(obj(moveable=True, mass=10.0), True, 30)
+    assert not is_trial_object(obj(moveable=True, mass=10.0), False, 30)
+    assert not is_trial_object(obj(moveable=True, mass=104.0), True, 30)
+    assert not is_trial_object(obj(moveable=True, mass=10.0, receptacleObjectIds=["Cup|1"]), True, 30)
+    assert not is_trial_object(obj(moveable=False, mass=10.0), True, 30)
+    door = {"objectId": "door|1|2", "objectType": "Doorway", "moveable": True, "mass": 1.0}
+    assert not is_trial_object(door, True, 30)
+
+
+def test_floor_spawns_are_split_by_room_polygon():
+    """Only the house-wide Floor returns spawns; each point goes to its own room."""
+    from shapely.geometry import Polygon
+
+    from scripts.placement_trials import floor_spawns_by_room
+
+    class Cache:
+        def coordinates(self, floor_id):
+            if floor_id != "Floor":
+                return []
+            return [{"x": 1, "y": 0, "z": 1}, {"x": 6, "y": 0, "z": 1}, {"x": 50, "y": 0, "z": 50}]
+
+    rooms = {
+        "room|1": Polygon([(0, 0), (0, 4), (4, 4), (4, 0)]),
+        "room|2": Polygon([(5, 0), (5, 4), (9, 4), (9, 0)]),
+    }
+    objects = [
+        {"objectId": "Floor", "objectType": "Floor"},
+        {"objectId": "room|1", "objectType": "Floor"},
+        {"objectId": "Chair|1", "objectType": "Chair"},
+    ]
+    grouped = floor_spawns_by_room(Cache(), objects, rooms)
+    assert [p["x"] for p in grouped["room|1"]] == [1]
+    assert [p["x"] for p in grouped["room|2"]] == [6]
+    assert set(grouped) == {"room|1", "room|2"}
