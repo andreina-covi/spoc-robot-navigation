@@ -20,7 +20,7 @@ from utils.constants.stretch_initialization_utils import (
     AGENT_ROTATION_DEG,
 )
 from utils.mask_stride import mask_render_stride
-from utils.collection_config import load_collection_config
+from utils.collection_config import capped_horizon, load_collection_config
 from utils.glance import (
     GlancePlanner,
     GlanceSettings,
@@ -137,6 +137,10 @@ class RoomVisitTask(AbstractSPOCTask):
 
     def _sync_collector_horizon(self):
         """Keep collector max_steps / FOV stride / nav camera params in sync."""
+        # configs/collection.yaml caps whatever horizon eval set (or left unset)
+        self.max_steps = capped_horizon(
+            self.max_steps, self._collection_cfg["episode"].get("max_policy_steps")
+        )
         if self.max_steps is not None and self.max_steps > 0:
             # Glance frames are extra; budget them so the policy's frames are kept
             self.collector.max_steps = self.max_steps + self._glance_frame_budget()

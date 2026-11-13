@@ -8,6 +8,11 @@ episode:
   # has (save_reason "timeout", truncated true) and the episode ends.
   # Round 3 (10 houses, local GPU): longest episode 112 s, ~0.2 s/step. 600 s ≈ 5x.
   timeout_s: 600
+  # Policy-step cap per episode (glance turns are extra). Clamps the task horizon
+  # (RoomVisit default 1000) so long walks do not slow cm-benchmark generation.
+  # Frames per walk: Round 3 18-625, Round 4 16-1013 (one hit the 1000 horizon).
+  # null keeps the task horizon.
+  max_policy_steps: 600
 
 glance:
   # Open-loop glance at nearby movable objects so the ID construct gets a clear

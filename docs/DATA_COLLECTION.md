@@ -243,6 +243,9 @@ Mitigations already in code:
   `min_steps_between`. Glance frames are added to the `max_steps` frame budget.
 - **Wall-clock timeout** (`episode.timeout_s`): the episode saves with
   `save_reason="timeout"` and ends.
+- **Policy-step cap** (`episode.max_policy_steps`, 600): clamps the task horizon
+  (RoomVisit 1000) so long walks do not slow cm-benchmark generation; the episode
+  saves with `save_reason="max_steps"`. Glance frames are extra. `null` keeps the horizon.
 - **FOV synthesis**: `renderInstanceSegmentation=True` at controller init, and
   per-step `renderImageSynthesis` is true on every agent step (stride 1). When
   synthesis is off, THOR may leave stale `instance_detections2D` on `last_event`.
