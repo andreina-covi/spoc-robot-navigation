@@ -224,6 +224,27 @@ class OnlineEvaluatorWorker:
 
         return self._task_sampler
 
+
+    @staticmethod
+    def _sync_executed_action(agent, task, action, all_actions):
+        """Tell the policy which action really ran.
+
+        RoomVisit may run a turn instead of the policy's ``end`` while rooms are
+        unvisited (configs/collection.yaml episode.continue_until_all_rooms_visited).
+        The agent caches its own choice as the next ``last_actions`` input, so
+        overwrite it with the executed action.
+        """
+        executed = getattr(task, "last_taken_action_str", action)
+        if executed == action:
+            return
+        all_actions[-1] = executed
+        cache = getattr(agent, "cache", None)
+        action2idx = getattr(getattr(agent, "preprocessor", None), "action2idx", None)
+        if not isinstance(cache, dict) or "last_actions" not in cache or not action2idx:
+            return
+        if executed in action2idx:
+            cache["last_actions"] = torch.full_like(cache["last_actions"], action2idx[executed])
+
     def evaluate_on_task(self, task: AbstractSPOCTask, agent: AbstractAgent, worker_id: int):
         goal = task.task_info["natural_language_spec"]
 
@@ -266,6 +287,7 @@ class OnlineEvaluatorWorker:
                     action = "sub_done"
                 all_actions.append(action)
                 task.step_with_action_str(action)
+                self._sync_executed_action(agent, task, action, all_actions)
 
                 if "nav_best_bbox" in observations:
                     add_bbox_sensor_to_image(
