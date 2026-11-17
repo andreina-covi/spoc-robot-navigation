@@ -99,6 +99,8 @@ class Collector:
         # Filled by the task: configs/collection.yaml contents and glance summary
         self.collection_config = None
         self.glances = []
+        # `done` actions the RoomVisit task turned into a turn (rooms unvisited)
+        self.done_overrides = 0
 
         self.tracked_objects = {}
         self.world_layout = None
@@ -1073,6 +1075,7 @@ class Collector:
             "motion": self._motion_check(),
             "collection_config": self.collection_config,
             "glances": self.glances,
+            "done_overrides": self.done_overrides,
         }
         with open(self._json_path("episode_meta"), "w") as f:
             json.dump(meta, f, indent=2)

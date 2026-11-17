@@ -132,6 +132,7 @@ class RoomVisitTask(AbstractSPOCTask):
             GlanceSettings.from_config(glance_cfg) if glance_cfg["enabled"] else None
         )
         self._glance_planner: Optional[GlancePlanner] = None  # built on first step
+        self._done_overrides = 0
         self.stride = mask_render_stride(collector_max_steps, ROOM_VISIT_HORIZON)
         self._sync_collector_horizon()
 
@@ -654,8 +655,31 @@ class RoomVisitTask(AbstractSPOCTask):
                     distances.append(dis)
         return distances
 
+    def _unvisited_room_count(self) -> int:
+        """Rooms of the house the agent has not stood in yet (collector tracking)."""
+        visited = set(getattr(self.collector, "visited_rooms", set()) or set())
+        return len(set(self.room_poly_map) - visited)
+
+    def _override_done(self, action_str: str) -> str:
+        """Turn an early `done` into a turn while rooms remain unvisited.
+
+        See configs/collection.yaml episode.continue_until_all_rooms_visited.
+        """
+        if action_str != THORActions.done:
+            return action_str
+        cfg = self._collection_cfg["episode"]
+        if not cfg.get("continue_until_all_rooms_visited"):
+            return action_str
+        if self._done_overrides >= int(cfg.get("max_done_overrides") or 0):
+            return action_str
+        if self._unvisited_room_count() == 0:
+            return action_str
+        self._done_overrides += 1
+        self.collector.done_overrides = self._done_overrides
+        return getattr(THORActions, cfg.get("done_override_action") or "rotate_right")
+
     def _step(self, action: int) -> RLStepResult:
-        action_str = self.action_names[action]
+        action_str = self._override_done(self.action_names[action])
         self.last_taken_action_str = action_str
 
         self._took_sub_done_action = False

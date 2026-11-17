@@ -13,6 +13,18 @@ episode:
   # Frames per walk: Round 3 18-625, Round 4 16-1013 (one hit the 1000 horizon).
   # null keeps the task horizon.
   max_policy_steps: 600
+  # Ignore the policy's `done` while some room of the house has not been visited
+  # (agent position inside the room polygon, the navigation `visited-rooms` column;
+  # not the policy's own sub_done "seen" marks). The ignored `done` becomes one
+  # `done_override_action`, so the policy gets a new view to re-plan from instead
+  # of repeating `done` on the same frame. max_policy_steps and timeout_s still end
+  # the episode. Round 6 (10 houses): 3 walks stopped with rooms unvisited
+  # (2/5, 4/5, 2/3); the other `done` walks had visited every room.
+  continue_until_all_rooms_visited: true
+  # After this many ignored `done`s in one episode the next `done` is accepted
+  # (16 turns of 45 degrees = two full turns in place).
+  max_done_overrides: 16
+  done_override_action: rotate_right
 
 glance:
   # Open-loop glance at nearby movable objects so the ID construct gets a clear

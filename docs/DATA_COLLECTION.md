@@ -189,7 +189,7 @@ HousePlant / Fridge / counters / windows stay in `navigation` only.
 **`navigation-*.csv`:** one row group per step with `ag-action`, `action_success` (`lastActionSuccess`), and `ag-pos-*` / `ag-rot-*` after the action. `current-room` and `current-room-type` are the agent's room. `obj-room` and `obj-room-type` are the room that contains that object. Object rows are added only when `visible-pixels > 0`. Numeric ids are included. Hidden tracked pickupables stay in `object_state`.
 `scripted-glance` is true on frames inserted by the open-loop glance (not chosen by the policy), and `glance-obj-id` names the object looked at. Consumers that replay the agent's route (cm-benchmark class 4) must skip those frames.
 
-**`episode_meta-*.json`:** `collection_config` is the `configs/collection.yaml` used for the run. `glances` lists each glance (`object_id`, `policy_step`, `first_timestep`, `turns`, `bearing_deg`, `distance_m`, `expected_px`). `save_reason` is `done`, `max_steps` or `timeout`, and `truncated` is true on a timeout.
+**`episode_meta-*.json`:** `collection_config` is the `configs/collection.yaml` used for the run. `glances` lists each glance (`object_id`, `policy_step`, `first_timestep`, `turns`, `bearing_deg`, `distance_m`, `expected_px`). `save_reason` is `done`, `max_steps` or `timeout`, and `truncated` is true on a timeout. `done_overrides` counts the `done` actions turned into a turn because rooms were still unvisited.
 
 **`objects-*.csv`:** one row per unique exported object. `obj-id` is the THOR id, including values like `6|5`. `obj-type` and `obj-synset` come from `describe_object`. `aabb-min-*` / `aabb-max-*` are the 3D axis-aligned corners. `room-id` and `room-type` are the room that contains the object. `pickupable`, `moveable` and `mass` are the THOR metadata values. Objaverse assets report mass 1.0, so use the box size to judge how large they are.
 
@@ -260,6 +260,12 @@ Mitigations already in code:
 - **Policy-step cap** (`episode.max_policy_steps`, 600): clamps the task horizon
   (RoomVisit 1000) so long walks do not slow cm-benchmark generation; the episode
   saves with `save_reason="max_steps"`. Glance frames are extra. `null` keeps the horizon.
+- **Room coverage** (`episode.continue_until_all_rooms_visited`): while a room of the
+  house has not been visited (the agent's position, as in `visited-rooms`), the
+  policy's `done` is replaced by one `done_override_action` (a 45° turn), so the
+  policy re-plans from a new view. After `max_done_overrides` (16) ignored `done`s
+  the next one is accepted; the step cap and timeout still apply. `episode_meta`
+  records the count as `done_overrides`.
 - **FOV synthesis**: `renderInstanceSegmentation=True` at controller init, and
   per-step `renderImageSynthesis` is true on every agent step (stride 1). When
   synthesis is off, THOR may leave stale `instance_detections2D` on `last_event`.
