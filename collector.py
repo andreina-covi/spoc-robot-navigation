@@ -266,6 +266,11 @@ class Collector:
             )
             if expected_bbox is not None:
                 expected_bbox_area = float(expected_bbox["area"])
+                # Share of the unoccluded projected box inside the frame (1 = not cut by the border).
+                area_raw = float(expected_bbox.get("area_raw") or 0.0)
+                in_frame_fraction = (
+                    min(1.0, expected_bbox_area / area_raw) if area_raw > 0 else None
+                )
                 expected_cmin = float(expected_bbox["cmin"])
                 expected_cmax = float(expected_bbox["cmax"])
                 expected_rmin = float(expected_bbox["rmin"])
@@ -281,6 +286,7 @@ class Collector:
                 )
             else:
                 expected_bbox_area = None
+                in_frame_fraction = None
                 expected_cmin = None
                 expected_cmax = None
                 expected_rmin = None
@@ -351,6 +357,9 @@ class Collector:
                     mark_y,
                     obj_dict.get("roomId"),
                     obj_dict.get("roomType"),
+                    None
+                    if in_frame_fraction is None
+                    else float(np.round(in_frame_fraction, 3)),
                 ]
             )
 
@@ -414,6 +423,7 @@ class Collector:
             dict_navigation["occupancy-ratio"].append(None)
             dict_navigation["mark-x"].append(None)
             dict_navigation["mark-y"].append(None)
+            dict_navigation["in-frame-fraction"].append(None)
             return
 
         for object_data in objects_data:
@@ -430,7 +440,11 @@ class Collector:
             self.save_bbox(dict_navigation, bbox)
             # Layout: [oid, dist, bbox, exp_area, ang_w, ang_h,
             #          exp_cmin, exp_cmax, exp_rmin, exp_rmax,
-            #          vis_px, area, min_side, occ, mark_x, mark_y, obj_room, obj_room_type]
+            #          vis_px, area, min_side, occ, mark_x, mark_y, obj_room, obj_room_type,
+            #          in_frame_fraction]
+            dict_navigation["in-frame-fraction"].append(
+                object_data[18] if len(object_data) > 18 else None
+            )
             if len(object_data) >= 14:
                 dict_navigation["expected-bbox-area"].append(object_data[3])
                 dict_navigation["ang-width-deg"].append(object_data[4])
@@ -522,6 +536,7 @@ class Collector:
             "occupancy-ratio": [],
             "mark-x": [],
             "mark-y": [],
+            "in-frame-fraction": [],
             "path": [],
         }
         for key in self.dict_agent:

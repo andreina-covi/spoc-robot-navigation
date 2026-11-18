@@ -44,7 +44,8 @@ def test_navigation_row_keeps_agent_room_and_object_room():
 
     assert catalog["Cup|1"]["room_id"] == "room|2"
     assert catalog["Cup|1"]["room_type"] == "Kitchen"
-    assert rows[0][16:] == ["room|2", "Kitchen"]
+    assert rows[0][16:18] == ["room|2", "Kitchen"]
+    assert rows[0][18] == 1.0  # in-frame-fraction: box fully inside the frame
 
     collector.dict_agent = {
         (0, "move"): {
