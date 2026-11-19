@@ -15,6 +15,7 @@ from online_evaluation.online_evaluation_types_and_utils import (
     NormalizedEvalSample,
     EvalSample,
     eval_sample_to_normalized_eval_sample,
+    room_visit_house_sample,
 )
 from utils.task_type_mapping_utils import inverse_map_task_type
 from online_evaluation.online_evaluator_worker import (
@@ -23,7 +24,12 @@ from online_evaluation.online_evaluator_worker import (
 )
 from tasks import REGISTERED_TASKS
 from training.offline.chores_dataset import ChoresDataset
-from utils.constants.objaverse_data_dirs import OBJAVERSE_HOUSES_DIR
+from utils.constants.objaverse_data_dirs import OBJAVERSE_HOUSES_DIR, OBJAVERSE_NAVIGATION_PATH
+from utils.export_progress import (
+    finished_episodes,
+    has_placement_trials,
+    set_aside_partial_episodes,
+)
 
 mp = mp.get_context("forkserver") if torch.cuda.is_available() else mp.get_context("spawn")
 LOG_INTERMEDIATE_RESULTS = True
@@ -228,6 +234,9 @@ class OnlineEvaluatorManager:
         preset_wandb=None,
         benchmark_revision="chores-small",
         det_type=None,
+        all_houses=False,
+        house_start=0,
+        house_end=None,
     ):
         self.benchmark_revision = benchmark_revision
 
@@ -253,6 +262,20 @@ class OnlineEvaluatorManager:
         self.skip_done = skip_done
         self.house_set = house_set
         self.det_type = det_type
+        self.all_houses = all_houses
+        self.house_start = house_start
+        self.house_end = house_end
+        self.placement_pending = {}
+
+        if self.all_houses:
+            if self.list_of_tasks != ["RoomVisit"]:
+                raise ValueError("--all_houses works only with --task_type RoomVisit")
+            if self.eval_subset not in ("val", "test"):
+                raise ValueError("--all_houses needs --eval_subset val or test")
+        elif self.eval_subset == "test":
+            # The benchmark samples are val samples; with test houses they would
+            # point at the wrong houses.
+            raise ValueError("--eval_subset test needs --all_houses")
 
         os.makedirs(self.outdir, exist_ok=self.exist_ok)
 
@@ -262,18 +285,20 @@ class OnlineEvaluatorManager:
         self.wandb = preset_wandb
         self.episode_exports = []
 
-        if self.eval_subset in ["train", "val"]:
-            assert len(self.list_of_tasks) == 1, "we do not support more than one for this option"
-            self.eval_samples = self.load_full_eval_samples(self.list_of_tasks[0])
-        else:
-            self.eval_samples = self.load_minival_eval_samples(self.list_of_tasks)
-
         if self.house_set == "procthor":
             self.houses = self.load_procthor_houses()
         elif self.house_set == "objaverse":
             self.houses = self.load_objaverse_houses()
         else:
             raise Exception("house_set not recognized", self.house_set)
+
+        if self.all_houses:
+            self.eval_samples = {"RoomVisit": self.load_all_house_samples()}
+        elif self.eval_subset in ["train", "val"]:
+            assert len(self.list_of_tasks) == 1, "we do not support more than one for this option"
+            self.eval_samples = self.load_full_eval_samples(self.list_of_tasks[0])
+        else:
+            self.eval_samples = self.load_minival_eval_samples(self.list_of_tasks)
 
         # eval_set_size has to be equal to the length of dataset if we are doing minival
         if self.eval_subset == "minival":
@@ -291,6 +316,38 @@ class OnlineEvaluatorManager:
 
         self.num_ended_workers = 0
         self.num_tasks_in_queue = 0
+
+    def load_all_house_samples(self) -> List[NormalizedEvalSample]:
+        """One RoomVisit sample per house index in [house_start, house_end) of the split."""
+        end = len(self.houses) if self.house_end is None else min(self.house_end, len(self.houses))
+        if not 0 <= self.house_start < end:
+            raise ValueError(
+                f"Empty house range [{self.house_start}, {end}) for {len(self.houses)} houses"
+            )
+        # Resume: houses with a finished episode are not walked again; those still
+        # without placement trials get only the trials (``placement_pending``).
+        finished = finished_episodes(OBJAVERSE_NAVIGATION_PATH)
+        samples = []
+        self.placement_pending = {}
+        set_aside = 0
+        for index in range(self.house_start, end):
+            done_dir = finished.get((self.eval_subset, index))
+            if done_dir is None:
+                set_aside += len(set_aside_partial_episodes(OBJAVERSE_NAVIGATION_PATH, index))
+                samples.append(
+                    room_visit_house_sample(
+                        index, len(self.houses[index]["rooms"]), self.eval_subset
+                    )
+                )
+            elif not has_placement_trials(done_dir):
+                self.placement_pending[index] = [done_dir]
+        print(
+            f"[all_houses] {self.eval_subset} houses {self.house_start}-{end}: "
+            f"{len(samples)} to walk, {end - self.house_start - len(samples)} already walked "
+            f"({len(self.placement_pending)} of them still need placement trials); "
+            f"{set_aside} unfinished folder(s) renamed to .partial-*"
+        )
+        return samples
 
     def load_minival_eval_samples(self, list_of_tasks) -> Dict[str, List[NormalizedEvalSample]]:
         all_task_samples = {}

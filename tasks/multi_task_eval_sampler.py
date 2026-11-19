@@ -1,3 +1,4 @@
+import random
 from typing import Dict, List, Union, Type, Any, Optional, Literal
 
 from allenact.utils.misc_utils import prepare_locals_for_super
@@ -19,6 +20,23 @@ from tasks.task_specs import (
 )
 from utils.constants.stretch_initialization_utils import HORIZON
 from utils.type_utils import Vector3, AgentPose, AbstractTaskArgs, REGISTERED_TASK_PARAMS
+
+# Start headings for seeded starts: the SPOC benchmark's start rotations are multiples of 30°.
+SEEDED_START_ROTATIONS_DEG = tuple(float(d) for d in range(0, 360, 30))
+
+
+def seeded_start_pose(reachable_positions, house_index: int):
+    """A start position and heading for a house, the same on every run.
+
+    Sorted so the choice does not depend on the order AI2-THOR returns positions,
+    and seeded by the house index.
+    """
+    if not reachable_positions:
+        raise RuntimeError(f"House {house_index} has no reachable positions")
+    ordered = sorted(reachable_positions, key=lambda p: (p["x"], p["z"], p["y"]))
+    rng = random.Random(int(house_index))
+    position = dict(rng.choice(ordered))
+    return position, rng.choice(SEEDED_START_ROTATIONS_DEG)
 
 
 class MultiTaskSampler(AbstractSPOCTaskSampler):
@@ -171,6 +189,12 @@ class MultiTaskSampler(AbstractSPOCTaskSampler):
 
         task_info = self.get_current_task_spec_task_info()
         task_info["extras"] = {}
+        if task_info.get("eval_info", {}).get("seeded_start"):
+            position, y_rotation = seeded_start_pose(
+                self.reachable_positions, self.current_house_index
+            )
+            task_info["agent_starting_position"] = position
+            task_info["agent_y_rotation"] = y_rotation
 
         # Enforce the task_info's house index
         house_index = int(task_info["house_index"])

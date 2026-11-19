@@ -150,6 +150,25 @@ def load_house(split: str, house_index: int, houses_dir: Path) -> dict:
     raise IndexError(f"{path} has no house at line index {house_index}")
 
 
+def load_houses(split: str, house_indices: List[int], houses_dir: Path) -> List[tuple]:
+    """``[(index, house)]`` in the order given, reading the split file once."""
+    path = houses_dir / f"{split}.jsonl.gz"
+    if not path.exists():
+        raise FileNotFoundError(path)
+    wanted = set(house_indices)
+    found = {}
+    with gzip.open(path, "rt") as handle:
+        for line_index, line in enumerate(handle):
+            if line_index in wanted:
+                found[line_index] = json.loads(line)
+                if len(found) == len(wanted):
+                    break
+    missing = sorted(wanted - set(found))
+    if missing:
+        raise IndexError(f"{path} has no houses at line indexes {missing}")
+    return [(index, found[index]) for index in house_indices]
+
+
 def passage_ids_from_house(house: dict) -> set:
     return {door["id"] for door in house.get("doors") or [] if door.get("id")}
 
@@ -482,7 +501,7 @@ def run(
     if OBJAVERSE_HOUSES_DIR is None:
         raise FileNotFoundError("OBJAVERSE_HOUSES_DIR is not set")
     houses_dir = Path(OBJAVERSE_HOUSES_DIR)
-    houses = [(index, load_house(split, index, houses_dir)) for index in house_indices]
+    houses = load_houses(split, house_indices, houses_dir)
     controller = open_controller()
     try:
         for index, house in houses:

@@ -75,7 +75,11 @@ python -m training.offline.online_eval --shuffle --eval_subset minival \
   --local_checkpoint_dir /home/andreina/Documents/Programs/Dataset/checkpoints
 ```
 
-Increase `--eval_set_size` for more episodes. Details, schemas, and QA recipes: [docs/DATA_COLLECTION.md](docs/DATA_COLLECTION.md).
+Increase `--eval_set_size` for more episodes.
+
+To walk every house of a split instead of the benchmark samples, add `--all_houses` with `--eval_subset val` or `--eval_subset test`, and optionally `--house_start N --house_end M` (house indexes N to M-1). This gives one RoomVisit episode per house, with the house's split recorded. The start pose is taken from the house's reachable positions with a heading that is a multiple of 30°, seeded by the house index, so a rerun starts each house in the same place. `--eval_set_size` and `--shuffle` do not apply. `--eval_subset test` without `--all_houses` is an error, because the benchmark samples are val samples and would point at test houses with the same index. Placement trials run afterwards for the same houses.
+
+Details, schemas, and QA recipes: [docs/DATA_COLLECTION.md](docs/DATA_COLLECTION.md).
 
 ### Output folder layout
 

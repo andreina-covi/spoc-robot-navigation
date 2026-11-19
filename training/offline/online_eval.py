@@ -25,7 +25,20 @@ def parse_args():
     parser.add_argument("--shuffle", action="store_true", default=False)
     parser.add_argument("--test_augmentation", action="store_true", default=False)
     parser.add_argument("--skip_done", action="store_true", default=False)
-    parser.add_argument("--eval_subset", default="minival", help="options: val, minival, train")
+    parser.add_argument(
+        "--eval_subset", default="minival", help="options: val, minival, train, test (test needs --all_houses)"
+    )
+    parser.add_argument(
+        "--all_houses",
+        action="store_true",
+        default=False,
+        help="RoomVisit only: one episode per house of the --eval_subset split (val or test), "
+        "not the benchmark samples; the start pose is seeded by the house index.",
+    )
+    parser.add_argument("--house_start", type=int, default=0, help="First house index (with --all_houses)")
+    parser.add_argument(
+        "--house_end", type=int, default=None, help="House index to stop before (with --all_houses)"
+    )
     parser.add_argument("--dataset_type", default="")
     parser.add_argument("--task_type", default="")
     parser.add_argument("--det_type", default="gt", help="gt or detic", choices=["gt", "detic"])
@@ -54,6 +67,14 @@ def parse_args():
 
     args = parser.parse_args()
 
+    if args.all_houses:
+        if args.task_type != "RoomVisit":
+            parser.error("--all_houses works only with --task_type RoomVisit")
+        if args.eval_subset not in ("val", "test"):
+            parser.error("--all_houses needs --eval_subset val or test")
+    elif args.eval_subset == "test":
+        parser.error("--eval_subset test needs --all_houses (the benchmark samples are val samples)")
+
     if len(args.gpu_devices) == 1 and args.gpu_devices[0] == -1:
         args.gpu_devices = None
     elif len(args.gpu_devices) == 0:
@@ -81,6 +102,7 @@ def get_eval_run_name(args):
             f"training_run_id={args.training_run_id}",
             f"eval_dataset={args.dataset_type}",
             f"eval_subset={args.eval_subset}",
+            *([f"all_houses={args.house_start}-{args.house_end}"] if args.all_houses else []),
             f"shuffle={args.shuffle}",
             f"sampling={args.sampling}",
         ]
@@ -202,10 +224,14 @@ def main(args):
         "table_size": args.total_num_videos,
         "benchmark_revision": args.benchmark_revision,
         "det_type": args.det_type,
+        "all_houses": args.all_houses,
+        "house_start": args.house_start,
+        "house_end": args.house_end,
     }
 
     evaluator = OnlineEvaluatorManager(**eval_args)
-    evaluator.evaluate(agent_class, agent_input)
+    if any(evaluator.eval_samples.values()):
+        evaluator.evaluate(agent_class, agent_input)
 
     if "RoomVisit" in list_of_tasks:
         from scripts.placement_trials import (
@@ -217,12 +243,25 @@ def main(args):
 
         samples = evaluator.eval_samples.get("RoomVisit", [])
         episode_dirs = annotation_dirs_by_house(evaluator.episode_exports)
-        for split, indexes in houses_from_samples(samples).items():
+        houses = houses_from_samples(samples)
+        if args.all_houses:
+            # Walked earlier (resumed run) but without placement trials yet.
+            for index, dirs in evaluator.placement_pending.items():
+                episode_dirs[(args.eval_subset, index)] = dirs
+                houses.setdefault(args.eval_subset, []).append(index)
+        for split, indexes in houses.items():
             missing = [index for index in indexes if (split, index) not in episode_dirs]
-            if missing:
+            if missing and not args.all_houses:
                 raise FileNotFoundError(
                     f"No episode annotations folder for {split} houses {missing}"
                 )
+            if missing:
+                # A failed walk must not cost the chunk its placement trials; a rerun
+                # of the same range walks these houses again.
+                print(f"[all_houses] no finished episode for {split} houses {missing}; skipped")
+                indexes = [index for index in indexes if index not in missing]
+            if not indexes:
+                continue
             output_dirs = {index: episode_dirs[(split, index)] for index in indexes}
             run_placement_trials(
                 split,

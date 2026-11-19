@@ -77,6 +77,49 @@ def eval_sample_to_normalized_eval_sample(
     )
 
 
+# RoomVisit goal text, word for word as in the SPOC benchmark samples (the policy reads it).
+ROOM_VISIT_GOAL = (
+    "go to all {num_rooms} rooms in the house. "
+    "indicate when you have seen a new room and when you are done"
+)
+
+
+def room_visit_house_sample(
+    house_index: int, num_rooms: int, house_split: str
+) -> NormalizedEvalSample:
+    """One RoomVisit sample for a house, not taken from the benchmark.
+
+    The start pose is a placeholder: ``seeded_start`` makes the eval task sampler
+    pick it from the house's reachable positions, seeded by the house index.
+    """
+    spec = {
+        "task_type": "SimpleExploreHouse",
+        "house_index": house_index,
+        "num_rooms_in_house": num_rooms,
+        "natural_language_spec": ROOM_VISIT_GOAL.format(num_rooms=num_rooms),
+        "extras": {},
+        "seeded_start": True,
+    }
+    sample = NormalizedEvalSample(
+        sample_id=f"task=RoomVisit,house={house_index},sub_house_id=0",
+        house_id=str(house_index).zfill(6),
+        task_type="RoomVisit",
+        sub_house_id=0,
+        needs_video=False,
+        raw_navigation_camera="",
+        sensors_path="",
+        observations=Observations(
+            goal=spec["natural_language_spec"],
+            initial_agent_location=np.zeros(6),
+            actions=[],
+            time_ids=[],
+            templated_task_type=json.dumps(spec),
+        ),
+    )
+    sample["house_split"] = house_split
+    return sample
+
+
 def normalized_eval_sample_to_task_spec(s: NormalizedEvalSample) -> "TaskSpec":
     templated_task_info = json.loads(s["observations"]["templated_task_type"])
     task_spec = {
