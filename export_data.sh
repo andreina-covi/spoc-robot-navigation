@@ -16,12 +16,19 @@
 # Run settings (environment variables):
 #   SPLIT       val (16000 houses). The houses folder has no test file, and train
 #               (160000 houses) is not supported: every chunk would load all of them
-#   START, END  house index range [START, END); END defaults to the split's house count
+#   START, END  house index range [START, END); END not set = every house of the split
+#               (counted from $OBJAVERSE_HOUSES_DIR/$SPLIT.jsonl.gz)
 #   CHUNK       houses per online_eval run
 #   RUN_ID, FLOOR_RADIUS_M  checkpoint run id and placement-trial floor radius
+# Sourcing it (". export_data.sh") would run it in your terminal's shell, and its
+# exit / set -e would close the terminal: refuse and say how to run it.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  echo "Run it as ./export_data.sh or bash export_data.sh, not with source or '.'" >&2
+  return 1
+fi
 set -euo pipefail
 
-cd "$(dirname "$(readlink -f "$0")")"
+cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 if [[ ! -f configure_variables.sh ]]; then
   echo "Missing configure_variables.sh: cp configure_variables.example.sh configure_variables.sh and set your paths" >&2
   exit 1

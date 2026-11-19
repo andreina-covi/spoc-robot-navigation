@@ -40,7 +40,7 @@ This sets:
 - `OBJAVERSE_DATA_DIR`
 - `OBJAVERSE_HOUSES_DIR`
 - `OBJAVERSE_NAVIGATION_PATH` — where episode CSVs / images are written
-- `EXPORT_OUT_ROOT`, `EXPORT_CKPT_DIR`, `EXPORT_PYTHON` (and optional `EXPORT_GPU`, `EXPORT_NUM_WORKERS`, `EXPORT_MEMORY_MAX`) — used by `export_data.sh`, the chunked export of every house of a split (`SPLIT=val START=0 END=3 ./export_data.sh` for a test; rerun it to resume)
+- `EXPORT_OUT_ROOT`, `EXPORT_CKPT_DIR`, `EXPORT_PYTHON` (and optional `EXPORT_GPU`, `EXPORT_NUM_WORKERS`, `EXPORT_MEMORY_MAX`) — used by `export_data.sh` (see [Export every house of a split](#export-every-house-of-a-split-chunked-resumable))
 
 ---
 
@@ -79,7 +79,44 @@ python -m training.offline.online_eval --shuffle --eval_subset minival \
 
 Increase `--eval_set_size` for more episodes.
 
-To walk every house of a split instead of the benchmark samples, add `--all_houses` with `--eval_subset val` or `--eval_subset test`, and optionally `--house_start N --house_end M` (house indexes N to M-1). This gives one RoomVisit episode per house, with the house's split recorded. The start pose is taken from the house's reachable positions with a heading that is a multiple of 30°, seeded by the house index, so a rerun starts each house in the same place. `--eval_set_size` and `--shuffle` do not apply. `--eval_subset test` without `--all_houses` is an error, because the benchmark samples are val samples and would point at test houses with the same index. Placement trials run afterwards for the same houses.
+To walk every house of a split instead of the benchmark samples, add `--all_houses` with `--eval_subset val` or `--eval_subset test` (the Objaverse house set, `--house_set objaverse`, has no test split), and optionally `--house_start N --house_end M` (house indexes N to M-1). This gives one RoomVisit episode per house, with the house's split recorded. The start pose is taken from the house's reachable positions with a heading that is a multiple of 30°, seeded by the house index, so a rerun starts each house in the same place. `--eval_set_size` and `--shuffle` do not apply. `--eval_subset test` without `--all_houses` is an error, because the benchmark samples are val samples and would point at test houses with the same index. Placement trials run afterwards for the same houses.
+
+### Export every house of a split (chunked, resumable)
+
+`export_data.sh` runs the command above with `--all_houses` over a whole split, in chunks of `CHUNK` houses, so a crash costs one chunk and not the whole run.
+
+```bash
+cd spoc-robot-training                      # any directory works; the script finds its own
+SPLIT=val START=0 END=3 ./export_data.sh    # test on houses 0, 1 and 2
+SPLIT=val CHUNK=500 ./export_data.sh        # every val house (END not set = all of them)
+```
+
+Run it as `./export_data.sh` or `bash export_data.sh`. Never run it with `source` or `.`: it refuses, because in your own shell its `exit` would close the terminal. On a laptop, `systemd-inhibit ./export_data.sh` keeps the machine from sleeping during the run.
+
+Settings:
+
+| Variable | Where | Meaning |
+|---|---|---|
+| `SPLIT` | command line | `val` (default). The Objaverse house folder has `val.jsonl.gz` (16,000 houses) and `train.jsonl.gz` (160,000 houses), and no test file. `train` is not supported: every chunk would load all 160,000 houses into memory. |
+| `START` | command line | First house index (default 0). |
+| `END` | command line | House index to stop before. **Not set = the number of houses in `$OBJAVERSE_HOUSES_DIR/$SPLIT.jsonl.gz`**, i.e. the whole split. |
+| `CHUNK` | command line | Houses per `online_eval` run (one model load each). |
+| `RUN_ID`, `FLOOR_RADIUS_M` | command line | Checkpoint run id (default `SigLIP-ViTb-3-CHORES-S`) and placement radius (default 1.2 m). |
+| `EXPORT_OUT_ROOT` | `configure_variables.sh` | Output root: episodes in `$EXPORT_OUT_ROOT/<split>/nav/house_XXXXXX/`, logs in `$EXPORT_OUT_ROOT/<split>/logs/chunk_<start>_<end>.log`. It replaces `OBJAVERSE_NAVIGATION_PATH` for this script. |
+| `EXPORT_CKPT_DIR`, `EXPORT_PYTHON` | `configure_variables.sh` | Checkpoint folder and the Python of the spoc environment. |
+| `EXPORT_GPU`, `EXPORT_NUM_WORKERS` | `configure_variables.sh` | GPU ids, space separated (default `0`), and workers per chunk (default 4). |
+| `EXPORT_MEMORY_MAX` | `configure_variables.sh` | e.g. `10G`: each chunk runs under `systemd-run --user --scope -p MemoryMax=...`, so running out of memory kills that chunk, not the desktop. Empty = no cap. A 15 GB laptop needs 1 worker and `10G`. |
+
+The script stops with a message when `configure_variables.sh` is missing, when a required path is still a `/path/to/...` placeholder, or when the house file or checkpoint folder does not exist.
+
+**Resuming.** Rerun the same command after a crash or a failed house; repeat until every chunk log says `0 to walk`. Each chunk log starts with a line like `[all_houses] val houses 0-500: 12 to walk, 488 already walked (3 of them still need placement trials); 1 unfinished folder(s) renamed to .partial-*`:
+
+- a house whose folder has `annotations/episode_meta-*.json` (written last, when the episode ends) is finished and is not walked again;
+- a finished house without `placement_candidates-*.csv` gets only the placement trials;
+- an unfinished folder of a house about to be walked again is renamed to `.partial-house_XXXXXX` (kept, but cm-benchmark skips dot folders), so the new walk gets the plain `house_XXXXXX` name;
+- a house whose walk fails is reported (`no finished episode for val houses [...]; skipped`) and the rest of the chunk still gets its placement trials.
+
+A worker that hits an error stops, and the other workers take its houses; if every worker of a chunk stops, the rerun walks what is left. Each exported house takes about 45-80 MB, so the full val split needs roughly 750 GB to 1.2 TB.
 
 Details, schemas, and QA recipes: [docs/DATA_COLLECTION.md](docs/DATA_COLLECTION.md).
 
@@ -87,7 +124,7 @@ Details, schemas, and QA recipes: [docs/DATA_COLLECTION.md](docs/DATA_COLLECTION
 
 ```text
 $OBJAVERSE_NAVIGATION_PATH/
-  <MM_DD_YYYY_HH_MM_SS_ffffff>/
+  house_XXXXXX/                             # one episode, named after the house
     images/                                 # RGB frames (img_<t>.png)
     annotations/                            # all CSV + JSON for the episode
       navigation-house_XXXXXX.csv
@@ -101,7 +138,7 @@ $OBJAVERSE_NAVIGATION_PATH/
       placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv
 ```
 
-Scene tag is `house_<index>` (not `Procedural`). Episode identity is the **folder** + `annotations/episode_meta` (not repeated on every CSV row).
+A second episode of the same house goes to `house_XXXXXX_2/` (then `_3`, ...), so nothing is overwritten. Scene tag is `house_<index>` (not `Procedural`). Episode identity is the **folder** + `annotations/episode_meta` (not repeated on every CSV row).
 
 **SPOC trajectory vs THOR navigability:** `navigation-*.csv` is the exact agent rollout (actions, success/fail, poses). `nav_graph-*.json` is environment reachability from `GetReachablePositions` (nodes + grid-adjacency edges), snapshotted at episode start and end. Do **not** treat the SPOC path as optimal.
 

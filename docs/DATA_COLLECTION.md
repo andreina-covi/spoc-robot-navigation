@@ -52,7 +52,9 @@ Scene naming: ProcTHOR `sceneName` is always `"Procedural"`. Files use `house_<z
 ## 3. Output layout
 
 Path: `$OBJAVERSE_NAVIGATION_PATH/`  
-(`configure_variables.sh` sets `OBJAVERSE_NAVIGATION_PATH`).
+(`configure_variables.sh` sets `OBJAVERSE_NAVIGATION_PATH`; `export_data.sh` uses `$EXPORT_OUT_ROOT/<split>/nav` instead).
+Each episode folder is named after the house; a second episode of the same house gets `_2`, `_3`, ...
+An unfinished folder that `export_data.sh` set aside before walking the house again is renamed `.partial-house_XXXXXX`.
 
 ```text
 $OBJAVERSE_NAVIGATION_PATH/
@@ -295,6 +297,14 @@ Mitigations already in code:
 # occupancy-ratio before it will pass against current collector.py.
 ```
 
+`configure_variables.sh` holds this machine's paths and is not in git (`.gitignore`). Create it once per machine from the template:
+
+```bash
+cp configure_variables.example.sh configure_variables.sh   # then edit the paths
+```
+
+Benchmark samples (a few episodes):
+
 ```bash
 . configure_variables.sh
 
@@ -309,6 +319,15 @@ python -m training.offline.online_eval --shuffle --eval_subset minival \
   --training_run_id SigLIP-ViTb-3-CHORES-S \
   --local_checkpoint_dir /home/andreina/Documents/Programs/Dataset/checkpoints
 ```
+
+Every house of a split, in resumable chunks (`END` not set = every house of the split; full settings and resume rules in the README, "Export every house of a split"):
+
+```bash
+SPLIT=val START=0 END=3 ./export_data.sh    # test on 3 houses; never `source` it
+SPLIT=val CHUNK=500 ./export_data.sh        # all 16,000 val houses; rerun to resume
+```
+
+It calls `online_eval` with `--all_houses --house_start --house_end`: one RoomVisit sample per house (goal text as in the benchmark, start pose from the house's reachable positions, seeded by the house index), then placement trials for the chunk. Finished houses (`episode_meta-*.json`) are skipped on a rerun (`utils/export_progress.py`).
 
 ```bash
 export RUN="$OBJAVERSE_NAVIGATION_PATH/house_XXXXXX"
@@ -373,5 +392,7 @@ Survey “novel shortcut” validation is mostly **downstream** (cm-benchmark); 
 | `utils/nav_graph_export.py` | Reachable nodes + 8-connected edges |
 | `scripts/summarize_episode_export.py` | Episode trajectory / nav summary |
 | `environment/spoc_objects.py` | `.get()` fix |
-| `configure_variables.sh` | Data dirs / navigation output |
+| `configure_variables.example.sh` | Template for the local, git-ignored `configure_variables.sh` (data dirs, navigation output, export settings) |
+| `export_data.sh` | Chunked, resumable export of every house of a split |
+| `utils/export_progress.py` | Finished / unfinished episodes of a collection folder (resume) |
 | `README.md` | Short how-to-run; **this file** for full design context |
