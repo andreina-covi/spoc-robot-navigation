@@ -50,11 +50,11 @@ This sets (edit paths in `configure_variables.sh` if needed):
 
 1. A pickupable is tracked the first time it has nav-camera mask pixels. Masks render on every agent step.
 2. When a movable object is close but out of view, the agent glances at it: a fixed number of 45° turns toward the object, then back. Those frames are marked `scripted-glance` in `navigation-*.csv`.
-3. On episode end (`done`, `max_steps` or `timeout`), logs are saved under `$OBJAVERSE_NAVIGATION_PATH/<timestamp>/` with `images/` and `annotations/`.
+3. On episode end (`done`, `max_steps` or `timeout`), logs are saved under `$OBJAVERSE_NAVIGATION_PATH/house_XXXXXX/` with `images/` and `annotations/` (`house_XXXXXX_2/`, `_3`… when that house already has a folder, so a re-collection never overwrites one).
 
 Movable objects are every pickupable and, with `placement.include_moveable`, every `moveable` object up to `placement.moveable_max_mass_kg` with nothing resting on it (chairs, plants, lamps, bins). The glance and the placement trials use this same set.
 
-Placement trials run in that same command, after the agent finishes. The house indexes are the ones already on the eval samples; they are passed in memory. Pass `--floor_radius_m`. The command writes `$OBJAVERSE_NAVIGATION_PATH/<timestamp>/annotations/placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`, next to the other episode files. Each movable object is tried on floor points beside the landmarks in its room, within that radius, and on the 5 largest non-openable receptacles in that room. A non-pickupable object that stands on the floor, such as a chair, gets floor trials only. Landmarks are the 5 largest non-pickupable, non-structural objects whose box bottom is within 0.1 m of the floor, including Objaverse instances. Doors and doorways are excluded. A receptacle place is kept only when that receptacle is a parent of the object; up to 3 spawn points nearest the top of the receptacle are tried. After a successful place the object is teleported back to its exact original pose. Each CSV row includes `obj-kind` (`pickupable` or `moveable`), `radius_m` and `parent-receptacle`. A house that fails does not stop the run: the simulator is restarted and the next house is tried.
+Placement trials run in that same command, after the agent finishes. The house indexes are the ones already on the eval samples; they are passed in memory. Pass `--floor_radius_m`. The command writes `$OBJAVERSE_NAVIGATION_PATH/house_XXXXXX/annotations/placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`, next to the other episode files. Each movable object is tried on floor points beside the landmarks in its room, within that radius, and on the 5 largest non-openable receptacles in that room. A non-pickupable object that stands on the floor, such as a chair, gets floor trials only. Landmarks are the 5 largest non-pickupable, non-structural objects whose box bottom is within 0.1 m of the floor, including Objaverse instances. Doors and doorways are excluded. A receptacle place is kept only when that receptacle is a parent of the object; up to 3 spawn points nearest the top of the receptacle are tried. After a successful place the object is teleported back to its exact original pose. Each CSV row includes `obj-kind` (`pickupable` or `moveable`), `radius_m` and `parent-receptacle`. A house that fails does not stop the run: the simulator is restarted and the next house is tried.
 
 Every collection setting (episode timeout, policy-step cap, glance, placement) is in `configs/collection.yaml`. The file used for a run is copied into `episode_meta-*.json` as `collection_config`.
 
@@ -119,7 +119,7 @@ python scripts/summarize_episode_export.py --run_dir "$RUN"
 
 ```bash
 ls -lt "$OBJAVERSE_NAVIGATION_PATH" | head
-export RUN="$OBJAVERSE_NAVIGATION_PATH/<timestamp>"
+export RUN="$OBJAVERSE_NAVIGATION_PATH/house_XXXXXX"
 export SCENE=house_XXXXXX
 cat "$RUN/annotations/episode_meta-${SCENE}.json"
 ```

@@ -41,7 +41,8 @@ class Collector:
     timesteps are recorded, further ``collect_data`` calls are no-ops. Step buffers
     are flushed to CSV periodically so long episodes do not keep the full table in RAM.
 
-    Episode layout under ``OBJAVERSE_NAVIGATION_PATH/<timestamp>/``:
+    Episode layout under ``OBJAVERSE_NAVIGATION_PATH/<house>/`` (``<house>_2``… when it
+    already exists):
     - ``images/`` — RGB frames
     - ``annotations/`` — all CSV and JSON exports
     """
@@ -83,8 +84,9 @@ class Collector:
         self.environment = environment
         self.dt = datetime.datetime.now().strftime("%m_%d_%Y_%H_%M_%S_%f")
         self.episode_id = f"{self.scene_name}_{self.dt}"
-        # Episode root: two sibling folders — images/ (frames) and annotations/ (CSV + JSON)
-        self.out_dir = os.path.join(OBJAVERSE_NAVIGATION_PATH, self.dt)
+        # Episode root, named after the house: two sibling folders — images/ (frames)
+        # and annotations/ (CSV + JSON)
+        self.out_dir = self._episode_dir(OBJAVERSE_NAVIGATION_PATH, self.scene_name)
         self.image_path = os.path.join(self.out_dir, "images")
         self.annotations_dir = os.path.join(self.out_dir, "annotations")
         self.dict_colors = {}
@@ -114,6 +116,16 @@ class Collector:
 
         os.makedirs(self.image_path, exist_ok=True)
         os.makedirs(self.annotations_dir, exist_ok=True)
+
+    @staticmethod
+    def _episode_dir(root: str, scene_name: str) -> str:
+        """``root/<scene_name>``; ``_2``, ``_3``… when an earlier episode used the name."""
+        out_dir = os.path.join(root, scene_name)
+        n = 2
+        while os.path.exists(out_dir):
+            out_dir = os.path.join(root, f"{scene_name}_{n}")
+            n += 1
+        return out_dir
 
     @property
     def at_capacity(self) -> bool:

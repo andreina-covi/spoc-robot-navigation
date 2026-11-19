@@ -2,7 +2,7 @@
 """Summarize one exported RoomVisit / invisible_displacement episode.
 
 Usage:
-  python scripts/summarize_episode_export.py --run_dir "$OBJAVERSE_NAVIGATION_PATH/<timestamp>"
+  python scripts/summarize_episode_export.py --run_dir "$OBJAVERSE_NAVIGATION_PATH/house_XXXXXX"
   python scripts/summarize_episode_export.py --run_dir ... --scene house_000012
 """
 
@@ -116,7 +116,7 @@ def summarize(run_dir: str, scene: Optional[str] = None) -> Dict[str, Any]:
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--run_dir", required=True, help="Episode root (.../<timestamp>/)")
+    p.add_argument("--run_dir", required=True, help="Episode root (.../house_XXXXXX/)")
     p.add_argument("--scene", default=None, help="e.g. house_000012 (default: detect)")
     args = p.parse_args(argv)
     summary = summarize(args.run_dir, args.scene)

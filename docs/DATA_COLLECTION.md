@@ -28,7 +28,7 @@ Episode kind tagged in meta: `invisible_displacement`. One RoomVisit command nav
 ```text
 online_eval (RoomVisit)
   └─ for each house in the eval samples
-       RoomVisitTask: agent navigates, Collector writes <timestamp>/images + annotations/
+       RoomVisitTask: agent navigates, Collector writes house_XXXXXX/images + annotations/
        worker returns annotations_dir with the sample result
   └─ after the agent finishes
        pass house indexes + those annotations/ paths to placement trials
@@ -56,7 +56,7 @@ Path: `$OBJAVERSE_NAVIGATION_PATH/`
 
 ```text
 $OBJAVERSE_NAVIGATION_PATH/
-  <timestamp>/                            # one episode
+  house_XXXXXX/                         # one episode
     images/
     annotations/
       navigation-house_XXXXXX.csv
@@ -67,7 +67,7 @@ $OBJAVERSE_NAVIGATION_PATH/
 Each episode root has **two** sibling folders:
 
 ```text
-<timestamp>/
+house_XXXXXX/
   images/                                 # RGB frames
     img_<t>.png
   annotations/                            # structured CSV + JSON for post-processing
@@ -124,7 +124,7 @@ Each episode root has **two** sibling folders:
 Summarize one run:
 
 ```bash
-python scripts/summarize_episode_export.py --run_dir "$OBJAVERSE_NAVIGATION_PATH/<timestamp>"
+python scripts/summarize_episode_export.py --run_dir "$OBJAVERSE_NAVIGATION_PATH/house_XXXXXX"
 ```
 
 ### Which objects go where
@@ -203,7 +203,7 @@ HousePlant / Fridge / counters / windows stay in `navigation` only.
 
 The RoomVisit command already knows the house indexes (`house_id` on the eval samples) and each episode's `annotations/` folder (returned by the worker). After the agent finishes, that same command passes both to the placement trials. Nothing is written just to remember the indexes.
 
-The CSV is written next to the other episode files: `$OBJAVERSE_NAVIGATION_PATH/<timestamp>/annotations/placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`. The radius is `--floor_radius_m` on the RoomVisit command (required; there is no default). Running `scripts/placement_trials.py` alone still accepts `--output` (default `$OBJAVERSE_NAVIGATION_PATH/placement_trials`) for a manual directory.
+The CSV is written next to the other episode files: `$OBJAVERSE_NAVIGATION_PATH/house_XXXXXX/annotations/placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`. The radius is `--floor_radius_m` on the RoomVisit command (required; there is no default). Running `scripts/placement_trials.py` alone still accepts `--output` (default `$OBJAVERSE_NAVIGATION_PATH/placement_trials`) for a manual directory.
 
 The objects tried are every pickupable and, when `placement.include_moveable` is true, every `moveable` object with mass up to `moveable_max_mass_kg` and nothing resting on it. Pickupables alone are too small for the ID construct: in Round 4 (10 houses) only 22 of 155 placed-and-seen pickupables ever covered 1% of the frame. Doors and structure are never moved. An object that carries other objects is skipped, because moving it would let them fall.
 
@@ -311,7 +311,7 @@ python -m training.offline.online_eval --shuffle --eval_subset minival \
 ```
 
 ```bash
-export RUN="$OBJAVERSE_NAVIGATION_PATH/<timestamp>"
+export RUN="$OBJAVERSE_NAVIGATION_PATH/house_XXXXXX"
 export SCENE=house_XXXXXX   # from filenames
 
 cat "$RUN/annotations/episode_meta-${SCENE}.json"
