@@ -130,7 +130,8 @@ def main(args):
     exp_base_dir = os.path.join(args.output_basedir, eval_run_name)
     ckpt_dir = os.path.join(exp_base_dir, "ckpts")
     exp_dir = os.path.join(exp_base_dir, datetime.datetime.now().strftime("%m_%d_%Y_%H_%M_%S_%f"))
-    os.makedirs(ckpt_dir, exist_ok=True)
+    if args.wandb_logging:  # only a wandb checkpoint download uses ckpts/
+        os.makedirs(ckpt_dir, exist_ok=True)
     os.makedirs(exp_dir, exist_ok=True)
 
     if args.wandb_logging:

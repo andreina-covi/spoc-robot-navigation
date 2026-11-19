@@ -91,7 +91,10 @@ for ((s = START; s < END; s += CHUNK)); do
     echo "  chunk $s-$e failed (see $log); rerun the script to resume it"
     failed=$((failed + 1))
   fi
-  grep -h "^\[all_houses\]" "$log" | tail -n 2 | sed 's/^/  /' || true
+  grep -h "^\[all_houses\]" "$log" | tail -n 1 | sed 's/^/  /' || true
+  # online_eval's own run folder (local wandb metrics) is not episode data; the chunk log
+  # above keeps everything it printed.
+  rm -rf "$LOG_DIR/online_eval"
 done
 
 done_count=$(find "$OBJAVERSE_NAVIGATION_PATH" -path '*/annotations/episode_meta-*.json' | wc -l)

@@ -527,7 +527,8 @@ class OnlineEvaluatorManager:
             cur_random_seq = inds[: len(samples)]
             random.shuffle(cur_random_seq)
 
-            for ind in cur_random_seq[: self.table_size]:
+            # An --all_houses export keeps only the episode data: no top-down images.
+            for ind in [] if self.all_houses else cur_random_seq[: self.table_size]:
                 samples[ind]["needs_video"] = True
 
             for sample in samples:

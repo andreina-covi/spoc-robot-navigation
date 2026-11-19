@@ -25,18 +25,24 @@ from utils.type_utils import Vector3, AgentPose, AbstractTaskArgs, REGISTERED_TA
 SEEDED_START_ROTATIONS_DEG = tuple(float(d) for d in range(0, 360, 30))
 
 
-def seeded_start_pose(reachable_positions, house_index: int):
-    """A start position and heading for a house, the same on every run.
+def seeded_start_candidates(reachable_positions, house_index: int):
+    """Start (position, heading) pairs for a house in a fixed order, best first.
 
-    Sorted so the choice does not depend on the order AI2-THOR returns positions,
-    and seeded by the house index.
+    Positions are sorted (AI2-THOR's order is not stable) and shuffled with the house
+    index as seed; each position's headings are shuffled the same way. The first pair
+    the agent can be teleported to is the start, so a rerun starts in the same place.
+    A reachable position can still fail at some headings: the Stretch body is not round.
     """
     if not reachable_positions:
         raise RuntimeError(f"House {house_index} has no reachable positions")
-    ordered = sorted(reachable_positions, key=lambda p: (p["x"], p["z"], p["y"]))
     rng = random.Random(int(house_index))
-    position = dict(rng.choice(ordered))
-    return position, rng.choice(SEEDED_START_ROTATIONS_DEG)
+    ordered = sorted(reachable_positions, key=lambda p: (p["x"], p["z"], p["y"]))
+    rng.shuffle(ordered)
+    for position in ordered:
+        headings = list(SEEDED_START_ROTATIONS_DEG)
+        rng.shuffle(headings)
+        for heading in headings:
+            yield dict(position), heading
 
 
 class MultiTaskSampler(AbstractSPOCTaskSampler):
@@ -189,12 +195,25 @@ class MultiTaskSampler(AbstractSPOCTaskSampler):
 
         task_info = self.get_current_task_spec_task_info()
         task_info["extras"] = {}
-        if task_info.get("eval_info", {}).get("seeded_start"):
-            position, y_rotation = seeded_start_pose(
+        seeded_start = bool(task_info.get("eval_info", {}).get("seeded_start"))
+        if seeded_start:
+            for position, y_rotation in seeded_start_candidates(
                 self.reachable_positions, self.current_house_index
-            )
-            task_info["agent_starting_position"] = position
-            task_info["agent_y_rotation"] = y_rotation
+            ):
+                pose = AgentPose(
+                    position=position,
+                    rotation=Vector3(x=0, y=y_rotation, z=0),
+                    horizon=HORIZON,
+                    standing=True,
+                )
+                if self.controller.step(action="TeleportFull", **pose):
+                    task_info["agent_starting_position"] = position
+                    task_info["agent_y_rotation"] = y_rotation
+                    break
+            else:
+                raise RuntimeError(
+                    f"No reachable position in house {self.current_house_index} takes the agent"
+                )
 
         # Enforce the task_info's house index
         house_index = int(task_info["house_index"])
@@ -210,9 +229,14 @@ class MultiTaskSampler(AbstractSPOCTaskSampler):
             standing=True,
         )
 
-        event = self.controller.step(
-            action="TeleportFull",
-            **starting_pose,
+        # A seeded start is already teleported (and checked) above.
+        event = (
+            True
+            if seeded_start
+            else self.controller.step(
+                action="TeleportFull",
+                **starting_pose,
+            )
         )
         if not event:
             if self.mode == "train":
@@ -229,7 +253,7 @@ class MultiTaskSampler(AbstractSPOCTaskSampler):
             else:
                 # This **must** be an error during eval rather than a warning for fairness/consistency.
                 raise RuntimeError(
-                    f"Teleport failed in {self.current_house_index} at {task_info['starting_pose']}"
+                    f"Teleport failed in {self.current_house_index} at {starting_pose}"
                 )
 
         self._last_sampled_task = REGISTERED_TASKS.get(task_info["task_type"])(

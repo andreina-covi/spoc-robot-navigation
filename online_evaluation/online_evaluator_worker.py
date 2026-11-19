@@ -559,7 +559,8 @@ class OnlineEvaluatorWorker:
                 plt.imsave(fname=cast(str, topdown_view_path), arr=sample_result["top_down_frame"])
 
                 # task_path = task_dict["task_path"]
-                gt_episode_len = task_info["expert_length"]
+                # Benchmark samples carry the expert length; --all_houses samples have no expert.
+                gt_episode_len = task_info.get("expert_length")
 
                 video_table_data = dict(
                     goal=sample_result["goal"],

@@ -6,25 +6,28 @@ from online_evaluation.online_evaluation_types_and_utils import (
 )
 from online_evaluation.online_evaluator import OnlineEvaluatorManager
 from scripts.placement_trials import houses_from_samples
-from tasks.multi_task_eval_sampler import SEEDED_START_ROTATIONS_DEG, seeded_start_pose
+from tasks.multi_task_eval_sampler import SEEDED_START_ROTATIONS_DEG, seeded_start_candidates
 
 
 def _grid():
     return [{"x": x * 0.25, "y": 0.9, "z": z * 0.25} for x in range(8) for z in range(8)]
 
 
-def test_seeded_start_pose_is_deterministic_and_order_free():
+def test_seeded_start_candidates_are_deterministic_and_order_free():
     grid = _grid()
-    first = seeded_start_pose(grid, 436)
-    assert seeded_start_pose(list(reversed(grid)), 436) == first
-    assert first[0] in grid
-    assert first[1] in SEEDED_START_ROTATIONS_DEG
-    assert len({str(seeded_start_pose(grid, i)) for i in range(20)}) > 1
+    first = list(seeded_start_candidates(grid, 436))
+    assert list(seeded_start_candidates(list(reversed(grid)), 436)) == first
+    # every position at every heading, each pair once
+    assert len(first) == len(grid) * len(SEEDED_START_ROTATIONS_DEG)
+    assert len({(p["x"], p["z"], h) for p, h in first}) == len(first)
+    assert {h for _, h in first} == set(SEEDED_START_ROTATIONS_DEG)
+    firsts = {str(next(seeded_start_candidates(grid, i))) for i in range(20)}
+    assert len(firsts) > 1  # different houses start in different places
 
 
-def test_seeded_start_pose_needs_positions():
+def test_seeded_start_candidates_need_positions():
     with pytest.raises(RuntimeError):
-        seeded_start_pose([], 3)
+        next(seeded_start_candidates([], 3))
 
 
 def test_house_sample_becomes_room_visit_task_spec():
@@ -35,6 +38,9 @@ def test_house_sample_becomes_room_visit_task_spec():
     assert spec["house_split"] == "test"
     assert spec["num_rooms_in_house"] == 4
     assert spec["eval_info"]["seeded_start"] is True
+    assert spec["eval_info"]["task_path"].split("/")[-4:] == [
+        "all_houses", "SimpleExploreHouse", "test", "000436"
+    ]
     assert spec["natural_language_spec"] == (
         "go to all 4 rooms in the house. "
         "indicate when you have seen a new room and when you are done"

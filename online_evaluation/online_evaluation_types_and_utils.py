@@ -99,6 +99,8 @@ def room_visit_house_sample(
         "natural_language_spec": ROOM_VISIT_GOAL.format(num_rooms=num_rooms),
         "extras": {},
         "seeded_start": True,
+        # The worker logs the last 4 parts of task_path as the episode's origin.
+        "task_path": f"all_houses/SimpleExploreHouse/{house_split}/{str(house_index).zfill(6)}",
     }
     sample = NormalizedEvalSample(
         sample_id=f"task=RoomVisit,house={house_index},sub_house_id=0",
