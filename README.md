@@ -28,17 +28,19 @@ That single `pip` command also installs `ai2thor==0+5d0ab8ab…` via `--extra-in
 
 Leave these pins unless you re-test online eval: `torch==2.0.1`, `numpy==1.23.5`, `allenact==0.5.4`.
 
-Then set dataset / output paths:
+Then set dataset / output paths. `configure_variables.sh` is local to each machine and is not in git: copy the template and fill in your paths.
 
 ```bash
+cp configure_variables.example.sh configure_variables.sh   # once per machine, then edit it
 . configure_variables.sh
 ```
 
-This sets (edit paths in `configure_variables.sh` if needed):
+This sets:
 
 - `OBJAVERSE_DATA_DIR`
 - `OBJAVERSE_HOUSES_DIR`
 - `OBJAVERSE_NAVIGATION_PATH` — where episode CSVs / images are written
+- `EXPORT_OUT_ROOT`, `EXPORT_CKPT_DIR`, `EXPORT_PYTHON` (and optional `EXPORT_GPU`, `EXPORT_NUM_WORKERS`, `EXPORT_MEMORY_MAX`) — used by `export_data.sh`, the chunked export of every house of a split (`SPLIT=val START=0 END=3 ./export_data.sh` for a test; rerun it to resume)
 
 ---
 
@@ -192,6 +194,7 @@ from `scripts/placement_trials.py` and `world_layout` (see [docs/DATA_COLLECTION
 | `scripts/normalize_object_types.py`   | Post-export obj-type / obj-synset (no simulator)          |
 | `environment/spoc_objects.py`         | `SPOCObject.get()` fix                                    |
 | `requirements.txt`                    | Python deps (including Stretch AI2-THOR)                  |
-| `configure_variables.sh`              | Dataset / navigation paths                                |
+| `configure_variables.example.sh`      | Template for the local `configure_variables.sh` (paths)   |
+| `export_data.sh`                      | Chunked, resumable export of every house of a split       |
 
 

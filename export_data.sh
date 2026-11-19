@@ -4,39 +4,51 @@
 #   ./export_data.sh                      # all houses of $SPLIT
 #   START=0 END=3 ./export_data.sh        # a test on houses 0-2
 #
+# Paths come from configure_variables.sh (not in git; copy configure_variables.example.sh
+# and fill it in): OBJAVERSE_*, EXPORT_OUT_ROOT, EXPORT_CKPT_DIR, EXPORT_PYTHON, and
+# optionally EXPORT_GPU, EXPORT_NUM_WORKERS, EXPORT_MEMORY_MAX.
+#
 # Resumable: rerun the same command after a crash or a failed house. A house with a
 # finished episode (episode_meta-*.json) is not walked again; one without placement
 # trials gets only the trials; an unfinished folder is renamed to .partial-house_*.
-# Keep rerunning until every chunk log ends with "0 to walk".
+# Keep rerunning until every chunk log says "0 to walk".
 #
-# Settings (environment variables; the defaults are for this machine, override on the server):
-#   SPLIT       val (16000 houses). $OBJAVERSE_HOUSES_DIR has no test file, and train
+# Run settings (environment variables):
+#   SPLIT       val (16000 houses). The houses folder has no test file, and train
 #               (160000 houses) is not supported: every chunk would load all of them
 #   START, END  house index range [START, END); END defaults to the split's house count
 #   CHUNK       houses per online_eval run
-#   OUT_ROOT    output root: walks in $OUT_ROOT/$SPLIT/nav, eval logs in $OUT_ROOT/$SPLIT/logs
-#   GPU         GPU ids, space separated ("0 1")
-#   PYTHON, NUM_WORKERS, CKPT_DIR, RUN_ID, FLOOR_RADIUS_M
-#   MEMORY_MAX  e.g. 40G: run each chunk under systemd-run with that memory cap (empty = no cap)
+#   RUN_ID, FLOOR_RADIUS_M  checkpoint run id and placement-trial floor radius
 set -euo pipefail
 
 cd "$(dirname "$(readlink -f "$0")")"
+if [[ ! -f configure_variables.sh ]]; then
+  echo "Missing configure_variables.sh: cp configure_variables.example.sh configure_variables.sh and set your paths" >&2
+  exit 1
+fi
 . ./configure_variables.sh
+
+for var in OBJAVERSE_DATA_DIR OBJAVERSE_HOUSES_DIR EXPORT_OUT_ROOT EXPORT_CKPT_DIR EXPORT_PYTHON; do
+  if [[ -z "${!var:-}" || "${!var}" == /path/to/* ]]; then
+    echo "Set $var in configure_variables.sh" >&2
+    exit 1
+  fi
+done
 
 SPLIT=${SPLIT:-val}
 CHUNK=${CHUNK:-3}
 START=${START:-0}
-OUT_ROOT=${OUT_ROOT:-/home/andreina/Documents/Programs/Dataset/Generated/export}
-PYTHON=${PYTHON:-python}
-NUM_WORKERS=${NUM_WORKERS:-4}
-GPU=${GPU:-0}
-CKPT_DIR=${CKPT_DIR:-/home/andreina/Documents/Programs/Dataset/checkpoints}
 RUN_ID=${RUN_ID:-SigLIP-ViTb-3-CHORES-S}
 FLOOR_RADIUS_M=${FLOOR_RADIUS_M:-1.2}
-MEMORY_MAX=${MEMORY_MAX:-}
+OUT_ROOT=$EXPORT_OUT_ROOT
+CKPT_DIR=$EXPORT_CKPT_DIR
+PYTHON=$EXPORT_PYTHON
+GPU=${EXPORT_GPU:-0}
+NUM_WORKERS=${EXPORT_NUM_WORKERS:-4}
+MEMORY_MAX=${EXPORT_MEMORY_MAX:-}
 
 HOUSES_FILE="$OBJAVERSE_HOUSES_DIR/$SPLIT.jsonl.gz"
-[[ -f "$HOUSES_FILE" ]] || { echo "No house file $HOUSES_FILE (SPLIT=val; this folder has no test file)" >&2; exit 1; }
+[[ -f "$HOUSES_FILE" ]] || { echo "No house file $HOUSES_FILE (use SPLIT=val)" >&2; exit 1; }
 if [[ -z "${END:-}" ]]; then
   echo "Counting houses in $HOUSES_FILE ..."
   END=$(zcat "$HOUSES_FILE" | wc -l)
@@ -59,6 +71,7 @@ for ((s = START; s < END; s += CHUNK)); do
   e=$((s + CHUNK)); ((e > END)) && e=$END
   log="$LOG_DIR/chunk_${s}_${e}.log"
   echo "$(date '+%F %T') houses $s-$e (log $log)"
+  # $GPU is unquoted on purpose: "0 1" becomes two ids.
   if ! "${RUNNER[@]}" "$PYTHON" -m training.offline.online_eval \
       --eval_subset "$SPLIT" --all_houses --house_start "$s" --house_end "$e" \
       --output_basedir "$LOG_DIR/online_eval" \
