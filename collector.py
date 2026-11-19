@@ -267,10 +267,13 @@ class Collector:
             if expected_bbox is not None:
                 expected_bbox_area = float(expected_bbox["area"])
                 # Share of the unoccluded projected box inside the frame (1 = not cut by the border).
+                # A box cut by the camera plane (an object beside or behind you) is mostly
+                # out of view, and its front-corner area_raw would overstate the share: 0.
                 area_raw = float(expected_bbox.get("area_raw") or 0.0)
-                in_frame_fraction = (
-                    min(1.0, expected_bbox_area / area_raw) if area_raw > 0 else None
-                )
+                if expected_bbox.get("corners_behind", 0) > 0 or area_raw <= 0:
+                    in_frame_fraction = 0.0
+                else:
+                    in_frame_fraction = min(1.0, expected_bbox_area / area_raw)
                 expected_cmin = float(expected_bbox["cmin"])
                 expected_cmax = float(expected_bbox["cmax"])
                 expected_rmin = float(expected_bbox["rmin"])
@@ -286,7 +289,9 @@ class Collector:
                 )
             else:
                 expected_bbox_area = None
-                in_frame_fraction = None
+                # Mask pixels but no usable projection (box behind the camera or
+                # outside the image): treat as not inside the frame.
+                in_frame_fraction = 0.0
                 expected_cmin = None
                 expected_cmax = None
                 expected_rmin = None
@@ -399,6 +404,7 @@ class Collector:
         dict_navigation["visited-rooms"].append(self.dict_agent[key]["visited_rooms"])
         dict_navigation["seen-rooms"].append(self.dict_agent[key]["seen_rooms"])
         dict_navigation["scripted-glance"].append(self.dict_agent[key].get("scripted_glance", False))
+        dict_navigation["step-source"].append(self.dict_agent[key].get("step_source", "policy"))
         dict_navigation["glance-obj-id"].append(self.dict_agent[key].get("glance_obj_id"))
 
     def save_data_navigation(self, dict_navigation, key):
@@ -514,6 +520,7 @@ class Collector:
             "visited-rooms": [],
             "seen-rooms": [],
             "scripted-glance": [],
+            "step-source": [],
             "glance-obj-id": [],
             "obj-id": [],
             "obj-room": [],
@@ -812,6 +819,7 @@ class Collector:
         include_detections=False,
         scripted_glance=False,
         glance_obj_id=None,
+        step_source="policy",
     ):
         # Truncate like an LLM context window: keep only the first max_steps frames
         if self.at_capacity:
@@ -864,6 +872,9 @@ class Collector:
             # Steps inserted by the open-loop glance, not chosen by the policy
             self.dict_agent[key]["scripted_glance"] = bool(scripted_glance)
             self.dict_agent[key]["glance_obj_id"] = glance_obj_id
+            # Who chose this step: policy, glance (scripted look), or done_override
+            # (a turn that replaced the policy's early done)
+            self.dict_agent[key]["step_source"] = step_source
             # Nav: id+distance every step; bbox/mask only when synthesis ran.
             # Use the nav ``event`` (not last_event) so displace PlaceObject steps
             # cannot wipe stride detections.

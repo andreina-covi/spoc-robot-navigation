@@ -533,6 +533,7 @@ class RoomVisitTask(AbstractSPOCTask):
         render_mask_this_step: bool,
         scripted_glance: bool = False,
         glance_obj_id: Optional[str] = None,
+        step_source: str = "policy",
     ) -> None:
         """Write one navigation row (+ object state) for the frame in ``event``."""
         if self.collector.at_capacity:
@@ -578,6 +579,7 @@ class RoomVisitTask(AbstractSPOCTask):
             include_detections=include_detections,
             scripted_glance=scripted_glance,
             glance_obj_id=glance_obj_id,
+            step_source=step_source,
         )
 
     def _maybe_glance(self, event) -> None:
@@ -624,6 +626,7 @@ class RoomVisitTask(AbstractSPOCTask):
                 render_mask_this_step=True,
                 scripted_glance=True,
                 glance_obj_id=target.object_id,
+                step_source="glance",
             )
 
     def _timed_out(self) -> bool:
@@ -680,6 +683,7 @@ class RoomVisitTask(AbstractSPOCTask):
 
     def _step(self, action: int) -> RLStepResult:
         action_str = self._override_done(self.action_names[action])
+        step_source = "done_override" if action_str != self.action_names[action] else "policy"
         self.last_taken_action_str = action_str
 
         self._took_sub_done_action = False
@@ -719,7 +723,7 @@ class RoomVisitTask(AbstractSPOCTask):
             )
             self.last_action_success = bool(event.metadata.get("lastActionSuccess", False))
 
-            self._log_frame(event, action_str, render_mask_this_step)
+            self._log_frame(event, action_str, render_mask_this_step, step_source=step_source)
             self._maybe_glance(event)
 
             position = self.controller.get_current_agent_position()

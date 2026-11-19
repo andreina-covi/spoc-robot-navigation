@@ -70,3 +70,8 @@ def test_navigation_row_keeps_agent_room_and_object_room():
     assert navigation["current-room-type"] == ["Bedroom"]
     assert navigation["obj-room"] == ["room|2"]
     assert navigation["obj-room-type"] == ["Kitchen"]
+    # Rows default to a policy step; every row carries step-source.
+    assert navigation["step-source"] == ["policy"]
+    assert navigation["in-frame-fraction"] == [1.0]
+    collector.dict_agent[(0, "move")]["step_source"] = "done_override"
+    assert collector.get_dict_navigation()["step-source"] == ["done_override"]

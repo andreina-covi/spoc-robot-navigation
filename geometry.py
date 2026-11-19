@@ -231,7 +231,9 @@ def expected_bbox_from_3d(
 
     ``clamp_to_image=True`` (default) reports the on-screen expected footprint so
     area stays comparable to the frame. Corners closer than ``min_depth`` in camera
-    space are ignored to avoid perspective blow-ups near the image plane.
+    space are ignored to avoid perspective blow-ups near the image plane; their
+    count is returned as ``corners_behind`` (the box is cut by the camera plane,
+    so ``area_raw`` covers only its front part).
     """
     corners = corners_from_box(obb_corners_world)
     if not corners:
@@ -243,10 +245,13 @@ def expected_bbox_from_3d(
 
     cols: List[float] = []
     rows: List[float] = []
+    # Corners behind (or almost on) the camera plane: the box is cut by it.
+    corners_behind = 0
     for p in corners:
         p_cam = R @ (_as_xyz(p) - cam)
         x, y, z = float(p_cam[0]), float(p_cam[1]), float(p_cam[2])
         if z < min_depth:
+            corners_behind += 1
             continue
         cols.append(cx + f_px * (x / z))
         rows.append(cy - f_px * (y / z))
@@ -272,6 +277,7 @@ def expected_bbox_from_3d(
             rmax=rmax_c,
             area=(cmax_c - cmin_c) * (rmax_c - rmin_c),
             area_raw=area_raw,
+            corners_behind=corners_behind,
         )
 
     if cmax <= cmin or rmax <= rmin:
@@ -283,4 +289,5 @@ def expected_bbox_from_3d(
         rmax=rmax,
         area=area_raw,
         area_raw=area_raw,
+        corners_behind=corners_behind,
     )
