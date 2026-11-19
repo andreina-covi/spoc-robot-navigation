@@ -15,7 +15,7 @@ It introduces new modules for spatial-semantic grounding, map-based navigation, 
 
 ## 1. Environment setup
 
-Python **3.9+**. Install the stack from `[requirements.txt](requirements.txt)` (simulation, training/eval, data collection, and the custom Stretch AI2-THOR build from AllenAI’s index):
+Python **3.10** (the tested environment). Install the stack from `[requirements.txt](requirements.txt)` (simulation, training/eval, data collection, and the custom Stretch AI2-THOR build from AllenAI’s index):
 
 ```bash
 python -m venv .venv
@@ -56,17 +56,17 @@ This sets:
 
 Movable objects are every pickupable and, with `placement.include_moveable`, every `moveable` object up to `placement.moveable_max_mass_kg` with nothing resting on it (chairs, plants, lamps, bins). The glance and the placement trials use this same set.
 
-Placement trials run in that same command, after the agent finishes. The house indexes are the ones already on the eval samples; they are passed in memory. Pass `--floor_radius_m`. The command writes `$OBJAVERSE_NAVIGATION_PATH/house_XXXXXX/annotations/placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`, next to the other episode files. Each movable object is tried on floor points beside the landmarks in its room, within that radius, and on the 5 largest non-openable receptacles in that room. A non-pickupable object that stands on the floor, such as a chair, gets floor trials only. Landmarks are the 5 largest non-pickupable, non-structural objects whose box bottom is within 0.1 m of the floor, including Objaverse instances. Doors and doorways are excluded. A receptacle place is kept only when that receptacle is a parent of the object; up to 3 spawn points nearest the top of the receptacle are tried. After a successful place the object is teleported back to its exact original pose. Each CSV row includes `obj-kind` (`pickupable` or `moveable`), `radius_m` and `parent-receptacle`. A house that fails does not stop the run: the simulator is restarted and the next house is tried.
+Placement trials run in that same command, after the agent finishes. The house indexes are the ones on the eval samples (or the `--all_houses` range); they are passed in memory. Pass `--floor_radius_m`. The command writes `$OBJAVERSE_NAVIGATION_PATH/house_XXXXXX/annotations/placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`, next to the other episode files. Each movable object is tried on floor points beside the landmarks in its room, within that radius, and on the 5 largest non-openable receptacles in that room. A non-pickupable object that stands on the floor, such as a chair, gets floor trials only. Landmarks are the 5 largest non-pickupable, non-structural objects whose box bottom is within 0.1 m of the floor, including Objaverse instances. Doors and doorways are excluded. A receptacle place is kept only when that receptacle is a parent of the object; up to 3 spawn points nearest the top of the receptacle are tried. After a successful place the object is teleported back to its exact original pose. Each CSV row includes `obj-kind` (`pickupable` or `moveable`), `radius_m` and `parent-receptacle`. A house that fails does not stop the run: the simulator is restarted and the next house is tried.
 
 Every collection setting (episode timeout, policy-step cap, glance, placement) is in `configs/collection.yaml`. The file used for a run is copied into `episode_meta-*.json` as `collection_config`.
 
-Run it:
+Run it on benchmark samples (`$LOGS_DIR` and `$CKPT_DIR` are your own folders: eval logs, and the folder holding the `SigLIP-ViTb-3-CHORES-S` checkpoint):
 
 ```bash
 . configure_variables.sh
 
 python -m training.offline.online_eval --shuffle --eval_subset minival \
-  --output_basedir /home/andreina/Documents/Programs/Dataset/logs \
+  --output_basedir "$LOGS_DIR" \
   --test_augmentation --task_type RoomVisit \
   --eval_set_size 1 \
   --floor_radius_m 1.2 \
@@ -74,19 +74,18 @@ python -m training.offline.online_eval --shuffle --eval_subset minival \
   --house_set objaverse --wandb_logging False --num_workers 1 \
   --gpu_devices 0 \
   --training_run_id SigLIP-ViTb-3-CHORES-S \
-  --local_checkpoint_dir /home/andreina/Documents/Programs/Dataset/checkpoints
+  --local_checkpoint_dir "$CKPT_DIR"
 ```
 
 Increase `--eval_set_size` for more episodes.
 
-To walk every house of a split instead of the benchmark samples, add `--all_houses` with `--eval_subset val` or `--eval_subset test` (the Objaverse house set, `--house_set objaverse`, has no test split), and optionally `--house_start N --house_end M` (house indexes N to M-1). This gives one RoomVisit episode per house, with the house's split recorded. The start pose is taken from the house's reachable positions with a heading that is a multiple of 30°, seeded by the house index, so a rerun starts each house in the same place. `--eval_set_size` and `--shuffle` do not apply. `--eval_subset test` without `--all_houses` is an error, because the benchmark samples are val samples and would point at test houses with the same index. Placement trials run afterwards for the same houses.
+To walk every house of a split instead of the benchmark samples, add `--all_houses` with `--eval_subset val` or `--eval_subset test` (the Objaverse house set, `--house_set objaverse`, has no test split), and optionally `--house_start N --house_end M` (house indexes N to M-1). This gives one RoomVisit episode per house, with the house's split recorded. The goal text is the benchmark's (`go to all <n> rooms in the house. ...`). The start is the first (reachable position, heading) pair, in an order seeded by the house index, where the agent can be teleported (a reachable position can still collide at some headings, because the Stretch body is not round); headings are multiples of the agent's 45° turn, so every heading of the walk lies on a direction of the 8-connected `nav_graph`. A rerun therefore starts each house in the same place. `--eval_set_size` and `--shuffle` do not apply. `--eval_subset test` without `--all_houses` is an error, because the benchmark samples are val samples and would point at test houses with the same index. Placement trials run afterwards for the same houses. Only the episode folders are cm-benchmark data: with `--all_houses` no top-down images are saved, and without `--wandb_logging` no `ckpts/` folder is made; `--output_basedir` still gets the local metrics log (`wandb/<id>/logs.txt`), which `export_data.sh` deletes after each chunk.
 
 ### Export every house of a split (chunked, resumable)
 
 `export_data.sh` runs the command above with `--all_houses` over a whole split, in chunks of `CHUNK` houses, so a crash costs one chunk and not the whole run.
 
 ```bash
-cd spoc-robot-training                      # any directory works; the script finds its own
 SPLIT=val START=0 END=3 ./export_data.sh    # test on houses 0, 1 and 2
 SPLIT=val CHUNK=500 ./export_data.sh        # every val house (END not set = all of them)
 ```
@@ -116,7 +115,7 @@ The script stops with a message when `configure_variables.sh` is missing, when a
 - an unfinished folder of a house about to be walked again is renamed to `.partial-house_XXXXXX` (kept, but cm-benchmark skips dot folders), so the new walk gets the plain `house_XXXXXX` name;
 - a house whose walk fails is reported (`no finished episode for val houses [...]; skipped`) and the rest of the chunk still gets its placement trials.
 
-A worker that hits an error stops, and the other workers take its houses; if every worker of a chunk stops, the rerun walks what is left. Each exported house takes about 45-80 MB, so the full val split needs roughly 750 GB to 1.2 TB.
+A worker that hits an error stops, and the other workers take its houses; if every worker of a chunk stops, the rerun walks what is left. Each chunk leaves only the episode folders and `logs/chunk_<start>_<end>.log` (appended on every rerun, so older errors stay in it). Each exported house takes about 4-80 MB (Round 9: 47 MB on average), so the full val split needs roughly 750 GB to 1.2 TB.
 
 Details, schemas, and QA recipes: [docs/DATA_COLLECTION.md](docs/DATA_COLLECTION.md).
 
@@ -142,7 +141,7 @@ A second episode of the same house goes to `house_XXXXXX_2/` (then `_3`, ...), s
 
 **SPOC trajectory vs THOR navigability:** `navigation-*.csv` is the exact agent rollout (actions, success/fail, poses). `nav_graph-*.json` is environment reachability from `GetReachablePositions` (nodes + grid-adjacency edges), snapshotted at episode start and end. Do **not** treat the SPOC path as optimal.
 
-Visibility columns on each navigation object row (`visible-pixels`, `bbox-area`, `min-side`, `occupancy-ratio`, `mark-x`, `mark-y`): see **[docs/VISIBILITY_METRICS.md](docs/VISIBILITY_METRICS.md)**. Agent room is `current-room` / `current-room-type`. Object room is `obj-room` / `obj-room-type` on the same row (and `room-id` / `room-type` in `objects-*.csv`). `objects-*.csv` also has the THOR properties `pickupable`, `moveable` and `mass`.
+The collector applies no visibility threshold: every non-structural detection is written with its metrics, and cm-benchmark filters later. Visibility columns on each navigation object row (`visible-pixels`, `bbox-area`, `min-side`, `occupancy-ratio`, `mark-x`, `mark-y`, `in-frame-fraction`, and the projected `expected-*` box): see **[docs/VISIBILITY_METRICS.md](docs/VISIBILITY_METRICS.md)**. Agent room is `current-room` / `current-room-type`. Object room is `obj-room` / `obj-room-type` on the same row (and `room-id` / `room-type` in `objects-*.csv`). `objects-*.csv` also has the THOR properties `pickupable`, `moveable` and `mass`.
 
 Summarize one export:
 
@@ -163,39 +162,17 @@ export SCENE=house_XXXXXX
 cat "$RUN/annotations/episode_meta-${SCENE}.json"
 ```
 
-Placement trials from that same command are `$RUN/annotations/placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`. The house indexes come from the eval samples.
+Placement trials from that same command are `$RUN/annotations/placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`. The house indexes come from the eval samples, or from the house range with `--all_houses`.
 `success` marks a place that was read and then restored.
-Full review snippets: [docs/DATA_COLLECTION.md](docs/DATA_COLLECTION.md) §§7–8.
+Full review snippets: [docs/DATA_COLLECTION.md](docs/DATA_COLLECTION.md) §7.
 
 ---
 
-## 4. Post-process spatial descriptions (existing pipeline)
+## 4. Normalize object types (older exports only)
 
-```bash
-python -m spatial_data_generation \
-  --csv_path_navigation "$RUN/annotations/navigation-${SCENE}.csv" \
-  --csv_path_objects "$RUN/annotations/objects-${SCENE}.csv" \
-  --json_path_dict "$RUN/annotations/jsons" \
-  --json_filename structured_data_angle.json
-```
+New exports write descriptive `obj-type`, `obj-synset`, and `assetId` while collecting, so this step is not needed for them. This script does the same fill for older episodes whose objects table still says `Undefined`, and prints confusable pairs from the synsets.
 
-Example (legacy flat layout / `Procedural` name; new runs use `annotations/` + `house_XXXXXX`):
-
-```bash
-python -m spatial_data_generation \
-  --csv_path_navigation /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_06_2026_17_02_54_768901/navigation-Procedural.csv \
-  --csv_path_objects /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_06_2026_17_02_54_768901/objects-Procedural.csv \
-  --json_path_dict /home/andreina/Documents/Programs/Dataset/Generated/navigation/05_06_2026_17_02_54_768901/jsons \
-  --json_filename structured_data_angle.json
-```
-
----
-
-## 5. Normalize object types (after export, before cm-benchmark)
-
-New exports write descriptive `obj-type`, `obj-synset`, and `assetId` while collecting. This script does the same fill for older episodes whose objects table still says `Undefined`, and prints confusable pairs from the synsets.
-
-`scripts/normalize_object_types.py` only edits files already written by the collector. It does not start AI2-THOR. The path can be one episode folder, its `annotations/` directory, or any parent of episode folders. Run it after an episode export and before building cm-benchmark items.
+`scripts/normalize_object_types.py` only edits files already written by the collector. It does not start AI2-THOR. The path can be one episode folder, its `annotations/` directory, or any parent of episode folders. Run it on an older export before building cm-benchmark items.
 
 ```bash
 python scripts/normalize_object_types.py --apply "$OBJAVERSE_NAVIGATION_PATH" --split val
@@ -209,14 +186,13 @@ Synset sources:
 
 `--split` is required for annotation lookup when `episode_meta` has a house index but no split. The script does not guess the split. The first apply copies each changed file to `<name>.orig.<ext>` and later runs read that copy. After writing, the script prints every object pair in the episode that has the same synset, a hypernym link in either direction (`is_hypernym_of`), or a shared direct hypernym.
 
-## 6. Generate QA (legacy spatial templates)
+## 5. Build questions
 
-For **placement-trial / survey** items, use `placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`
-from `scripts/placement_trials.py` and `world_layout` (see [docs/DATA_COLLECTION.md](docs/DATA_COLLECTION.md)).
+Questions are built by cm-benchmark (a separate repository) from the episode folders: stage 1 reads every `annotations/` file plus `images/`, stage 2 writes the items. This repository only collects.
 
 ---
 
-## 7. Code entry points
+## 6. Code entry points
 
 
 | File                                  | Role                                                      |
@@ -225,7 +201,10 @@ from `scripts/placement_trials.py` and `world_layout` (see [docs/DATA_COLLECTION
 | `docs/VISIBILITY_METRICS.md`          | Formulas for nav visibility CSV columns                   |
 | `tasks/room_visit_task.py`            | RoomVisit step loop, layout, nav graph                    |
 | `scripts/placement_trials.py`         | Placement trials after RoomVisit navigation in the same command |
-| `collector.py`                        | CSV/JSON logging, visibility tracking, `nav_graph` export |
+| `collector.py`                        | CSV/JSON logging, visibility metrics, `nav_graph` export  |
+| `training/offline/online_eval.py`     | Runs RoomVisit episodes (`--all_houses` for a whole split) |
+| `utils/export_progress.py`            | Finished / unfinished episodes of a folder (resume)       |
+| `configs/collection.yaml`             | Every collection setting (timeouts, glance, placement)    |
 | `utils/nav_graph_export.py`           | Reachable-position nodes + grid-adjacency edges           |
 | `scripts/summarize_episode_export.py` | One-episode nav/trajectory summary                        |
 | `scripts/normalize_object_types.py`   | Post-export obj-type / obj-synset (no simulator)          |

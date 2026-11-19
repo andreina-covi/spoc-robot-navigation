@@ -16,10 +16,11 @@ Extend SPOC RoomVisit navigation logging so post-processing / **cm-benchmark** c
 |-----------|------|
 | `invisible_displacement` | Per house, each movable object is trial-placed on floor points next to landmarks in its room and on the 5 largest non-openable receptacles in that room. Movable objects are every pickupable plus, with `placement.include_moveable`, every `moveable` object up to `moveable_max_mass_kg` with nothing resting on it (chairs, plants, lamps, bins). Landmarks are the 5 largest non-pickupable, non-structural objects whose box bottom is within 0.1 m of the floor, including Objaverse instances. Doors are excluded. Up to 3 floor spawns per landmark and up to 3 receptacle spawns nearest the top face. A receptacle place is kept only when that receptacle is in `parentReceptacles`. After a successful place the object is teleported back to its exact pose. A failed restore reloads the house before the next object. Rows land in the episode `annotations/` folder as `placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv` and include `obj-kind`, `radius_m` and `parent-receptacle`. |
 | `survey_knowledge` | Multi-room trajectory + layout connectivity / door state |
+| everything else | cm-benchmark builds all its constructs from the same episode folders (navigation, objects, poses, nav graph) |
 
 Facing / intrinsic “front of object” is **out of scope** for this pass.
 
-Episode kind tagged in meta: `invisible_displacement`. One RoomVisit command navigates, then trial-places objects in those houses. House indexes and each episode's `annotations/` path are passed in memory after eval. Navigation itself does not move objects.
+Episode kind tagged in meta: `invisible_displacement`. One RoomVisit command navigates, then trial-places objects in those houses (benchmark samples, or every house of a range with `--all_houses`; see §7). House indexes and each episode's `annotations/` path are passed in memory after eval. Navigation itself does not move objects.
 
 ---
 
@@ -27,7 +28,7 @@ Episode kind tagged in meta: `invisible_displacement`. One RoomVisit command nav
 
 ```text
 online_eval (RoomVisit)
-  └─ for each house in the eval samples
+  └─ for each house in the eval samples (or each house of --house_start..--house_end with --all_houses)
        RoomVisitTask: agent navigates, Collector writes house_XXXXXX/images + annotations/
        worker returns annotations_dir with the sample result
   └─ after the agent finishes
@@ -143,7 +144,7 @@ python scripts/summarize_episode_export.py --run_dir "$OBJAVERSE_NAVIGATION_PATH
 
 | Stage | What is dropped at collection time | Who decides the rest |
 |-------|------------------------------------|----------------------|
-| Navigation / objects CSV | Structural (Wall/Floor/Ceiling/Room) + zero mask pixels. Numeric ids are kept. | Post-processing via metrics |
+| Navigation / objects CSV | Structural (Wall/Floor/Ceiling/Room) + zero mask pixels. Numeric ids are kept. | cm-benchmark, from the metrics |
 
 **Why export-all-with-metrics for nav:** thresholds can be retuned without re-running THOR; different tasks can use different cutoffs.
 
@@ -160,9 +161,9 @@ python scripts/summarize_episode_export.py --run_dir "$OBJAVERSE_NAVIGATION_PATH
 | `min-side` | `min(width, height)` of the detection bbox |
 | `occupancy-ratio` | `visible-pixels / bbox-area` |
 | `mark-x`, `mark-y` | Full-image pixel farthest from the edge of that same mask crop |
+| `in-frame-fraction` | Share of the expected (unoccluded) box inside the frame; 0 when the box is cut by the camera plane or cannot be projected |
 
-Example post-process keep rule: apply your own cutoffs on
-`visible-pixels` / `min-side` / `occupancy-ratio`.
+No cutoff is applied here; cm-benchmark holds the keep/drop rules.
 
 Fully hidden / behind other geometry never appear in detections. Out-of-camera objects are
 not in `navigation` for that step. Hidden pickupables appear only in `object_state`
@@ -189,7 +190,7 @@ HousePlant / Fridge / counters / windows stay in `navigation` only.
 **`placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv`** is written into that episode's `annotations/` folder by `scripts/placement_trials.py` after navigation. `obj-kind` is `pickupable` or `moveable` (a non-pickupable object such as a chair). `anchor-id` is the receptacle id or the landmark id. `anchor-kind` is `receptacle` or `floor`. `pos-*` is the resolved pose when `success` is true. A successful place is restored before the next anchor. Episodes collected before this change may still contain `displacement_events`, `displacement_candidates`, and `displacement_debug`; those files are not written now.
 
 **`navigation-*.csv`:** one row group per step with `ag-action`, `action_success` (`lastActionSuccess`), and `ag-pos-*` / `ag-rot-*` after the action. `current-room` and `current-room-type` are the agent's room. `obj-room` and `obj-room-type` are the room that contains that object. Object rows are added only when `visible-pixels > 0`. Numeric ids are included. Hidden tracked pickupables stay in `object_state`.
-`scripted-glance` is true on frames inserted by the open-loop glance (not chosen by the policy), and `glance-obj-id` names the object looked at. Consumers that replay the agent's route (cm-benchmark class 4) must skip those frames.
+`scripted-glance` is true on frames inserted by the open-loop glance (not chosen by the policy), and `glance-obj-id` names the object looked at. `step-source` says who chose each step: `policy`, `glance`, or `done_override` (a turn that replaced an early `done`). Consumers that replay the agent's route (cm-benchmark class 4) must skip glance frames.
 
 **`episode_meta-*.json`:** `collection_config` is the `configs/collection.yaml` used for the run. `glances` lists each glance (`object_id`, `policy_step`, `first_timestep`, `turns`, `bearing_deg`, `distance_m`, `expected_px`). `save_reason` is `done`, `max_steps` or `timeout`, and `truncated` is true on a timeout. `done_overrides` counts the `done` actions turned into a turn because rooms were still unvisited.
 
@@ -291,11 +292,7 @@ Mitigations already in code:
 
 ## 7. How to run / review
 
-```bash
-# Note: tests/test_visibility_filters.py still targets the old silhouette /
-# unoccluded-ratio API and needs a rewrite for visible-pixels / min-side /
-# occupancy-ratio before it will pass against current collector.py.
-```
+Tests: `python -m pytest tests` (after `. configure_variables.sh`). They need no simulator.
 
 `configure_variables.sh` holds this machine's paths and is not in git (`.gitignore`). Create it once per machine from the template:
 
@@ -303,13 +300,13 @@ Mitigations already in code:
 cp configure_variables.example.sh configure_variables.sh   # then edit the paths
 ```
 
-Benchmark samples (a few episodes):
+Benchmark samples (a few episodes; `$LOGS_DIR` and `$CKPT_DIR` are your own folders for eval logs and the checkpoint):
 
 ```bash
 . configure_variables.sh
 
 python -m training.offline.online_eval --shuffle --eval_subset minival \
-  --output_basedir /home/andreina/Documents/Programs/Dataset/logs \
+  --output_basedir "$LOGS_DIR" \
   --test_augmentation --task_type RoomVisit \
   --eval_set_size 1 \
   --floor_radius_m 1.2 \
@@ -317,7 +314,7 @@ python -m training.offline.online_eval --shuffle --eval_subset minival \
   --house_set objaverse --wandb_logging False --num_workers 1 \
   --gpu_devices 0 \
   --training_run_id SigLIP-ViTb-3-CHORES-S \
-  --local_checkpoint_dir /home/andreina/Documents/Programs/Dataset/checkpoints
+  --local_checkpoint_dir "$CKPT_DIR"
 ```
 
 Every house of a split, in resumable chunks (`END` not set = every house of the split; full settings and resume rules in the README, "Export every house of a split"):
@@ -327,7 +324,7 @@ SPLIT=val START=0 END=3 ./export_data.sh    # test on 3 houses; never `source` i
 SPLIT=val CHUNK=500 ./export_data.sh        # all 16,000 val houses; rerun to resume
 ```
 
-It calls `online_eval` with `--all_houses --house_start --house_end`: one RoomVisit sample per house (goal text as in the benchmark, start pose from the house's reachable positions, seeded by the house index), then placement trials for the chunk. Finished houses (`episode_meta-*.json`) are skipped on a rerun (`utils/export_progress.py`).
+It calls `online_eval` with `--all_houses --house_start --house_end`: one RoomVisit sample per house (goal text as in the benchmark; the start is the first reachable position and heading, in an order seeded by the house index, where the agent can be teleported), then placement trials for the chunk. Finished houses (`episode_meta-*.json`) are skipped on a rerun (`utils/export_progress.py`). The output folder keeps only the episode folders and one log per chunk.
 
 ```bash
 export RUN="$OBJAVERSE_NAVIGATION_PATH/house_XXXXXX"
@@ -337,11 +334,9 @@ cat "$RUN/annotations/episode_meta-${SCENE}.json"
 # Inspect $RUN/annotations/placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv
 ```
 
-Legacy spatial QA (`spatial_data_generation.py`, `qa_generator.py`) still consumes nav/objects CSVs (now under `annotations/`). Placement trials for a RoomVisit run are the `placement_candidates-*.csv` file in that same `annotations/` folder.
-
 ---
 
-## 8. Building QA from placement trials
+## 8. Using the placement trials (cm-benchmark)
 
 **Placement file:** `$RUN/annotations/placement_candidates-house_XXXXXX-<split>-radius_<meters>.csv` from `scripts/placement_trials.py`. `anchor-id` / `anchor-kind` name the receptacle or the landmark whose floor point was tried. `pos-*` is the resolved pose when `success` is true. `parent-receptacle` lists parent ids after a receptacle place. A successful place is restored before the next anchor.
 
@@ -351,15 +346,7 @@ Do **not** expect egocentric direction columns at collection time; compute those
 
 For a house, each movable object (`obj-kind` `pickupable` or `moveable`) has one floor row per landmark that has a qualifying spawn within the requested radius. It also has up to five receptacle rows, except a non-pickupable object that stands on the floor, which has floor rows only. Floor `success` is true when `PlaceObjectAtPoint` succeeded at one of up to `max_floor_spawns` points. A floor row means the object lies on the floor beside `anchor-id`, not on it. Receptacle `success` also requires that receptacle id in `parentReceptacles` (up to 3 nearest top-face spawns are tried). The original pose is restored only when the place action succeeds. A failed restore reloads the house before the next object.
 
-### Example item types
-
-1. **Final location:** “Where could the cup be?” → successful `placement_candidates` positions for that `obj-id`.
-2. **Which surface:** group rows by `anchor-id`.
-3. **Which object:** “Which object was tried on CounterTop|…?”
-
-Example past run that used the old displacement register:  
-`…/Generated/navigation/07_13_2026_15_15_34_072561/` (`house_007514`).
-
+cm-benchmark reads this file in stage 1 and uses the successful places as destinations for invisible-displacement items.
 ---
 
 ## 9. Survey side (lighter)
@@ -376,8 +363,7 @@ Survey “novel shortcut” validation is mostly **downstream** (cm-benchmark); 
 
 ## 10. Suggested next work (for agents)
 
-- Optional: human-readable receptacle labels for templates.
-- Writer that emits cm-benchmark items JSON from `placement_candidates` and `object_state` (including egocentric directions at a chosen query step).
+- Items are built in cm-benchmark, not here. If a quality fix there needs a field this export lacks, add it to the collector and collect again.
 - Do **not** invent semantic object facing from `obj-rot` unless THOR exposes a trusted signal.
 
 ---
@@ -387,6 +373,9 @@ Survey “novel shortcut” validation is mostly **downstream** (cm-benchmark); 
 | Path | Notes |
 |------|--------|
 | `collector.py` | Tracking, CSV/JSON export, `nav_graph` + `episode_meta` |
+| `training/offline/online_eval.py` | RoomVisit runs; `--all_houses` walks a range of houses |
+| `tasks/multi_task_eval_sampler.py` | Seeded start pose for `--all_houses` (`seeded_start_candidates`) |
+| `configs/collection.yaml` | Every collection setting |
 | `tasks/room_visit_task.py` | World layout, door log, nav graph snapshots |
 | `scripts/placement_trials.py` | Per-house placement trials |
 | `utils/nav_graph_export.py` | Reachable nodes + 8-connected edges |

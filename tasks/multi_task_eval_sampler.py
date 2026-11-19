@@ -18,11 +18,14 @@ from tasks.task_specs import (
     TaskSpecSampler,
     TaskSpecSamplerDatasetWrapper,
 )
-from utils.constants.stretch_initialization_utils import HORIZON
+from utils.constants.stretch_initialization_utils import AGENT_ROTATION_DEG, HORIZON
 from utils.type_utils import Vector3, AgentPose, AbstractTaskArgs, REGISTERED_TASK_PARAMS
 
-# Start headings for seeded starts: the SPOC benchmark's start rotations are multiples of 30°.
-SEEDED_START_ROTATIONS_DEG = tuple(float(d) for d in range(0, 360, 30))
+# Start headings for seeded starts: multiples of the agent's turn (45°), so every heading
+# of the walk lies on a direction of the 8-connected nav graph (cm-benchmark class 4).
+SEEDED_START_ROTATIONS_DEG = tuple(
+    float(d) for d in range(0, 360, int(AGENT_ROTATION_DEG))
+)
 
 
 def seeded_start_candidates(reachable_positions, house_index: int):
