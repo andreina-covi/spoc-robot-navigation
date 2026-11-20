@@ -330,7 +330,12 @@ class OnlineEvaluatorManager:
         samples = []
         self.placement_pending = {}
         set_aside = 0
+        # The houses file has a ``null`` line for each house that failed to
+        # generate (e.g. val houses 7, 32, 89); there is nothing to walk there.
+        missing = [i for i in range(self.house_start, end) if self.houses[i] is None]
         for index in range(self.house_start, end):
+            if self.houses[index] is None:
+                continue
             done_dir = finished.get((self.eval_subset, index))
             if done_dir is None:
                 set_aside += len(set_aside_partial_episodes(OBJAVERSE_NAVIGATION_PATH, index))
@@ -343,8 +348,10 @@ class OnlineEvaluatorManager:
                 self.placement_pending[index] = [done_dir]
         print(
             f"[all_houses] {self.eval_subset} houses {self.house_start}-{end}: "
-            f"{len(samples)} to walk, {end - self.house_start - len(samples)} already walked "
+            f"{len(samples)} to walk, "
+            f"{end - self.house_start - len(samples) - len(missing)} already walked "
             f"({len(self.placement_pending)} of them still need placement trials); "
+            f"{len(missing)} skipped (no house in the houses file{': ' + str(missing) if missing else ''}); "
             f"{set_aside} unfinished folder(s) renamed to .partial-*"
         )
         return samples
