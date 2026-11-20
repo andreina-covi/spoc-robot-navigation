@@ -113,3 +113,47 @@ def test_load_houses_reads_once_in_given_order(tmp_path):
     assert [h["id"] for _, h in load_houses("val", [7, 2, 5], tmp_path)] == [7, 2, 5]
     with pytest.raises(IndexError):
         load_houses("val", [3, 12], tmp_path)
+
+
+def _fake_placement_run(monkeypatch, tmp_path, restarts_ok):
+    """Run placement_trials.run on 3 houses where house 1 hangs the simulator."""
+    import scripts.placement_trials as pt
+
+    class FakeController:
+        def stop(self):
+            pass
+
+    opened = []
+
+    def open_controller():
+        if opened and not restarts_ok:
+            raise Exception("Unity process has exited ... returncode=-11")
+        opened.append(FakeController())
+        return opened[-1]
+
+    def reset_house(controller, house):
+        if house["id"] == 1:
+            raise TimeoutError("PlaceObjectAtPoint hung")
+
+    monkeypatch.setattr(pt, "OBJAVERSE_HOUSES_DIR", str(tmp_path))
+    monkeypatch.setattr(pt, "load_houses", lambda s, ids, d: [(i, {"id": i}) for i in ids])
+    monkeypatch.setattr(pt, "open_controller", open_controller)
+    monkeypatch.setattr(pt, "reset_house", reset_house)
+    monkeypatch.setattr(pt, "trials_for_house", lambda *a: [{"success": True}])
+    monkeypatch.setattr(pt, "RESTART_WAIT_S", 0)
+    written = []
+    monkeypatch.setattr(pt, "write_csv", lambda path, rows: written.append(path.parent.name))
+    pt.run("val", [0, 1, 2], tmp_path, 1.0, 5)
+    return written, len(opened)
+
+
+def test_placement_restarts_controller_after_a_hang(monkeypatch, tmp_path):
+    written, opened = _fake_placement_run(monkeypatch, tmp_path, restarts_ok=True)
+    assert opened == 2 and len(written) == 2  # houses 0 and 2 get their trials
+
+
+def test_placement_stops_cleanly_when_unity_does_not_restart(monkeypatch, tmp_path, capsys):
+    written, _ = _fake_placement_run(monkeypatch, tmp_path, restarts_ok=False)
+    assert len(written) == 1  # house 0 only; no exception ends the chunk
+    out = capsys.readouterr().out
+    assert "restart 3/3 failed" in out and "house_000002" in out

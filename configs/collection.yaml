@@ -77,6 +77,14 @@ placement:
   # Without it the object intersects the surface ("Spawn area not clear").
   lift_epsilon_m: 0.01
   physics_settle_steps: 10  # AdvancePhysicsStep calls after a house reload
+  # Seconds one trial step (place, teleport back, read) may take before the
+  # simulator counts as hung. Trial steps take well under a second; the house
+  # reload keeps the controller's long timeout (MAXIMUM_SERVER_TIMEOUT).
+  step_timeout_s: 120
+  # After a hang the simulator is restarted; a fresh Unity can crash at start
+  # while the old one's GPU memory is being freed, so wait and try again.
+  restart_attempts: 3
+  restart_wait_s: 30
   # After a trial the object is teleported back; farther than this from its
   # original position counts as a failed restore and the house is reloaded.
   restore_tolerance_m: 0.01

@@ -34,6 +34,7 @@ import csv
 import gzip
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -48,7 +49,10 @@ from utils.constants.objaverse_data_dirs import (  # noqa: E402
     OBJAVERSE_HOUSES_DIR,
     OBJAVERSE_NAVIGATION_PATH,
 )
-from utils.constants.stretch_initialization_utils import STRETCH_ENV_ARGS  # noqa: E402
+from utils.constants.stretch_initialization_utils import (  # noqa: E402
+    MAXIMUM_SERVER_TIMEOUT,
+    STRETCH_ENV_ARGS,
+)
 from utils.collection_config import load_collection_config  # noqa: E402
 from utils.placement_anchors import (  # noqa: E402
     TOP_LANDMARKS,
@@ -93,6 +97,9 @@ CSV_FIELDS = (
 )
 
 PHYSICS_SETTLE_STEPS = int(_PLACEMENT["physics_settle_steps"])
+STEP_TIMEOUT_S = float(_PLACEMENT["step_timeout_s"])
+RESTART_ATTEMPTS = int(_PLACEMENT["restart_attempts"])
+RESTART_WAIT_S = float(_PLACEMENT["restart_wait_s"])
 
 
 def house_name(house_index: int) -> str:
@@ -355,10 +362,24 @@ def trial_receptacle(
 
 
 def reset_house(controller: StretchController, house: dict) -> None:
-    """Reload the house and let objects fall before their poses are read."""
+    """Reload the house and let objects fall before their poses are read.
+
+    The reload may take minutes, so it runs with the controller's long timeout;
+    the trial steps after it get ``STEP_TIMEOUT_S``, so a hung step (e.g. a
+    ``PlaceObjectAtPoint`` that never returns) costs minutes instead of
+    ``MAXIMUM_SERVER_TIMEOUT``.
+    """
+    set_step_timeout(controller, MAXIMUM_SERVER_TIMEOUT)
     controller.reset(house)
+    set_step_timeout(controller, STEP_TIMEOUT_S)
     for _ in range(PHYSICS_SETTLE_STEPS):
         controller.step(action="AdvancePhysicsStep", renderImageSynthesis=False)
+
+
+def set_step_timeout(controller: StretchController, seconds: float) -> None:
+    server = getattr(controller.controller, "server", None)
+    if server is not None and hasattr(server, "timeout"):
+        server.timeout = seconds
 
 
 def scene_objects(controller: StretchController) -> List[dict]:
@@ -489,6 +510,25 @@ def open_controller() -> StretchController:
     )
 
 
+def restart_controller(controller: Optional[StretchController]) -> Optional[StretchController]:
+    """Stop ``controller`` and open a new one; None when Unity will not start."""
+    if controller is not None:
+        try:
+            controller.stop()
+        except Exception:
+            pass
+    for attempt in range(1, RESTART_ATTEMPTS + 1):
+        time.sleep(RESTART_WAIT_S)
+        try:
+            return open_controller()
+        except Exception as exc:
+            print(
+                f"[placement] controller restart {attempt}/{RESTART_ATTEMPTS} failed ({exc!r})",
+                flush=True,
+            )
+    return None
+
+
 def run(
     split: str,
     house_indices: List[int],
@@ -504,7 +544,7 @@ def run(
     houses = load_houses(split, house_indices, houses_dir)
     controller = open_controller()
     try:
-        for index, house in houses:
+        for position, (index, house) in enumerate(houses):
             name = house_name(index)
             print(f"[placement] loading {name}", flush=True)
             try:
@@ -513,11 +553,17 @@ def run(
             except Exception as exc:
                 # One bad house must not end a run of hundreds: restart and go on.
                 print(f"[placement] {name} failed ({exc!r}); restarting the controller", flush=True)
-                try:
-                    controller.stop()
-                except Exception:
-                    pass
-                controller = open_controller()
+                controller = restart_controller(controller)
+                if controller is None:
+                    # The walked episodes are already exported; a rerun of the
+                    # same range adds the trials these houses are missing.
+                    left = [house_name(i) for i, _ in houses[position + 1 :]]
+                    print(
+                        f"[placement] Unity does not start again; no placement trials for "
+                        f"{len(left)} remaining house(s) {left}",
+                        flush=True,
+                    )
+                    return
                 continue
             destinations = _destinations(index, output_dir, output_dirs)
             ok = sum(1 for item in rows if item["success"])
@@ -526,7 +572,8 @@ def run(
                 write_csv(path, rows)
                 print(f"[placement] wrote {path} rows={len(rows)} success={ok}")
     finally:
-        controller.stop()
+        if controller is not None:
+            controller.stop()
 
 
 def _destinations(
